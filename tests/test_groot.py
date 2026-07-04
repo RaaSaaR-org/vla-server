@@ -1,18 +1,24 @@
 """
-Tests for GR00T N1 model backend.
+Tests for GR00T N1.7 model backend.
 
-All tests run in stub mode — no ZMQ server or GPU required.
+Stub tests need no deps; protocol tests run a minimal in-process
+Isaac-GR00T PolicyServer emulator over real ZMQ (loopback).
 """
 
 import base64
 import io
-import os
+import threading
+import time
 
 import numpy as np
 import pytest
 from PIL import Image
 
 from models.groot import ACTION_DIM, CHUNK_SIZE, GR00TModel
+
+zmq = pytest.importorskip("zmq")
+import msgpack  # noqa: E402
+import msgpack_numpy as msgpack_np  # noqa: E402
 
 
 @pytest.fixture
@@ -32,6 +38,81 @@ def dummy_image_b64() -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+# ── Fake Isaac-GR00T PolicyServer ────────────────────────────────
+
+
+class FakeGrootServer(threading.Thread):
+    """Emulates the Isaac-GR00T N1.7 PolicyServer wire protocol.
+
+    Envelope: {"endpoint", "data", "api_token"?} via msgpack_numpy.
+    get_action returns (action_dict, info_dict); errors as {"error": str}.
+    """
+
+    def __init__(self, api_token: str | None = None, horizon: int = CHUNK_SIZE):
+        super().__init__(daemon=True)
+        self.ctx = zmq.Context()
+        self.socket = self.ctx.socket(zmq.REP)
+        self.port = self.socket.bind_to_random_port("tcp://127.0.0.1")
+        self.api_token = api_token
+        self.horizon = horizon
+        self.requests: list[dict] = []
+        self.delay_next_s: float = 0.0
+        self._stop_event = threading.Event()
+
+    def run(self):
+        poller = zmq.Poller()
+        poller.register(self.socket, zmq.POLLIN)
+        while not self._stop_event.is_set():
+            if not poller.poll(50):
+                continue
+            raw = self.socket.recv()
+            req = msgpack.unpackb(raw, object_hook=msgpack_np.decode, raw=False)
+            self.requests.append(req)
+            if self.delay_next_s:
+                time.sleep(self.delay_next_s)  # outlive the client's RCVTIMEO
+                self.delay_next_s = 0.0
+            self.socket.send(
+                msgpack.packb(
+                    self._respond(req), default=msgpack_np.encode, use_bin_type=True
+                )
+            )
+        self.socket.close(linger=0)
+        self.ctx.term()
+
+    def _respond(self, req: dict):
+        if self.api_token and req.get("api_token") != self.api_token:
+            return {"error": "unauthorized"}
+        endpoint = req.get("endpoint")
+        if endpoint == "ping":
+            return {"status": "ok", "message": "Server is running"}
+        if endpoint == "reset":
+            return {"status": "reset"}
+        if endpoint == "get_action":
+            action = {
+                "single_arm": np.arange(self.horizon * 5, dtype=np.float32).reshape(
+                    1, self.horizon, 5
+                ),
+                "gripper": np.full((1, self.horizon, 1), 0.5, dtype=np.float32),
+            }
+            return [action, {}]  # (action, info) tuple arrives as list
+        return {"error": f"unknown endpoint: {endpoint}"}
+
+    def stop(self):
+        self._stop_event.set()
+        self.join(timeout=2)
+
+
+@pytest.fixture
+def fake_server():
+    server = FakeGrootServer()
+    server.start()
+    yield server
+    server.stop()
+
+
+# ── Stub-mode tests ──────────────────────────────────────────────
+
+
 class TestGR00TStubPredict:
     def test_stub_returns_correct_shape(self, stub_model):
         result = stub_model.predict(
@@ -43,11 +124,7 @@ class TestGR00TStubPredict:
         assert all(len(a) == ACTION_DIM for a in result.actions)
 
     def test_stub_inference_time_positive(self, stub_model):
-        result = stub_model.predict(
-            images={},
-            state=[0.0] * 6,
-            task="test",
-        )
+        result = stub_model.predict(images={}, state=[0.0] * 6, task="test")
         assert result.inference_time_ms >= 0
 
     def test_stub_actions_vary_between_calls(self, stub_model):
@@ -55,139 +132,204 @@ class TestGR00TStubPredict:
         r2 = stub_model.predict(images={}, state=[0.0] * 6, task="test")
         assert r1.actions[0] != r2.actions[0]
 
-    def test_stub_with_partial_state(self, stub_model):
-        result = stub_model.predict(
-            images={},
-            state=[1.0, 2.0],
-            task="test",
-        )
-        assert len(result.actions) == CHUNK_SIZE
-        assert len(result.actions[0]) == ACTION_DIM
+    def test_stub_reports_is_stub(self, stub_model):
+        assert stub_model.is_stub is True
 
 
 class TestGR00TInfo:
-    def test_info_model_name(self, stub_model):
+    def test_info_defaults(self, stub_model):
         info = stub_model.info()
         assert info.action_dim == ACTION_DIM
         assert info.chunk_size == CHUNK_SIZE
         assert info.state_dim == 6
         assert "front" in info.cameras
 
-    def test_info_before_load(self):
-        model = GR00TModel(stub=True)
+    def test_info_custom_modality(self):
+        model = GR00TModel(
+            stub=True,
+            video_key="ego_view",
+            state_keys={"left_arm": 7, "right_arm": 7},
+            action_keys=["left_arm", "right_arm"],
+        )
         info = model.info()
-        assert info.action_dim == ACTION_DIM
+        assert info.cameras == ["ego_view"]
+        assert info.state_dim == 14
+        assert info.action_dim == 14
+
+
+# ── Observation building (N1.7 nested format) ────────────────────
 
 
 class TestGR00TBuildObservation:
-    def test_observation_with_image(self, dummy_image_b64):
-        obs = GR00TModel._build_observation(
+    def test_observation_video_batched(self, stub_model, dummy_image_b64):
+        obs = stub_model._build_observation(
             images={"front": dummy_image_b64},
             state=[1.0, 2.0, 3.0, 4.0, 5.0, 0.5],
             task="pick up the cube",
         )
-        assert "video.front" in obs
-        assert obs["video.front"].shape == (224, 224, 3)
-        assert obs["video.front"].dtype == np.uint8
+        assert obs["video"]["front"].shape == (1, 1, 224, 224, 3)
+        assert obs["video"]["front"].dtype == np.uint8
 
-    def test_observation_state_split(self, dummy_image_b64):
-        obs = GR00TModel._build_observation(
+    def test_observation_state_split_batched(self, stub_model, dummy_image_b64):
+        obs = stub_model._build_observation(
             images={"front": dummy_image_b64},
             state=[1.0, 2.0, 3.0, 4.0, 5.0, 0.5],
             task="test",
         )
+        assert obs["state"]["single_arm"].shape == (1, 1, 5)
+        assert obs["state"]["gripper"].shape == (1, 1, 1)
         np.testing.assert_array_equal(
-            obs["state.single_arm"], np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
+            obs["state"]["single_arm"][0, 0],
+            np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float32),
         )
         np.testing.assert_array_equal(
-            obs["state.gripper"], np.array([0.5], dtype=np.float32)
+            obs["state"]["gripper"][0, 0], np.array([0.5], dtype=np.float32)
         )
 
-    def test_observation_task_annotation(self, dummy_image_b64):
-        obs = GR00TModel._build_observation(
+    def test_observation_language_task(self, stub_model, dummy_image_b64):
+        obs = stub_model._build_observation(
             images={"front": dummy_image_b64},
             state=[0.0] * 6,
             task="move left",
         )
-        assert obs["annotation.human.task_description"] == "move left"
+        assert obs["language"]["task"] == [["move left"]]
 
-    def test_observation_partial_state(self, dummy_image_b64):
-        obs = GR00TModel._build_observation(
-            images={"front": dummy_image_b64},
-            state=[1.0, 2.0],
-            task="test",
+    def test_observation_partial_state_zero_padded(self, stub_model):
+        obs = stub_model._build_observation(images={}, state=[1.0, 2.0], task="test")
+        np.testing.assert_array_equal(
+            obs["state"]["single_arm"][0, 0],
+            np.array([1.0, 2.0, 0.0, 0.0, 0.0], dtype=np.float32),
         )
         np.testing.assert_array_equal(
-            obs["state.single_arm"], np.array([1.0, 2.0], dtype=np.float32)
-        )
-        np.testing.assert_array_equal(
-            obs["state.gripper"], np.array([0.0], dtype=np.float32)
+            obs["state"]["gripper"][0, 0], np.array([0.0], dtype=np.float32)
         )
 
-    def test_observation_no_image(self):
-        obs = GR00TModel._build_observation(
-            images={}, state=[0.0] * 6, task="test"
+    def test_observation_no_image(self, stub_model):
+        obs = stub_model._build_observation(images={}, state=[0.0] * 6, task="test")
+        assert obs["video"] == {}
+        assert "single_arm" in obs["state"]
+
+
+# ── Action parsing ───────────────────────────────────────────────
+
+
+class TestGR00TParseAction:
+    def test_parse_batched_3d(self, stub_model):
+        action = {
+            "single_arm": np.ones((1, 4, 5), dtype=np.float32),
+            "gripper": np.full((1, 4, 1), 0.5, dtype=np.float32),
+        }
+        rows = stub_model._parse_action(action)
+        assert len(rows) == 4
+        assert rows[0] == [1.0, 1.0, 1.0, 1.0, 1.0, 0.5]
+
+    def test_parse_unbatched_2d(self, stub_model):
+        action = {
+            "single_arm": np.zeros((16, 5), dtype=np.float32),
+            "gripper": np.ones((16, 1), dtype=np.float32),
+        }
+        rows = stub_model._parse_action(action)
+        assert len(rows) == 16
+        assert rows[0][-1] == 1.0
+
+    def test_parse_missing_key_raises(self, stub_model):
+        with pytest.raises(RuntimeError, match="missing action key"):
+            stub_model._parse_action({"single_arm": np.zeros((1, 4, 5))})
+
+
+# ── Wire-protocol tests against the fake PolicyServer ────────────
+
+
+class TestGR00TProtocol:
+    def _model(self, server: FakeGrootServer, **kwargs) -> GR00TModel:
+        model = GR00TModel(
+            host="127.0.0.1", port=server.port, timeout_ms=2000, **kwargs
         )
-        assert "video.front" not in obs
-        assert "state.single_arm" in obs
-
-
-class TestGR00TCombineActions:
-    def test_combine_2d(self):
-        arm = np.array([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]], dtype=np.float32)
-        grip = np.array([[0.1], [0.2]], dtype=np.float32)
-        result = GR00TModel._combine_actions(arm, grip)
-        assert len(result) == 2
-        assert len(result[0]) == 6
-        assert result[0] == [1.0, 2.0, 3.0, 4.0, 5.0, pytest.approx(0.1, abs=1e-5)]
-        assert result[1] == [6.0, 7.0, 8.0, 9.0, 10.0, pytest.approx(0.2, abs=1e-5)]
-
-    def test_combine_1d(self):
-        arm = [1, 2, 3, 4, 5]
-        grip = [0.5]
-        result = GR00TModel._combine_actions(arm, grip)
-        assert len(result) == 1
-        assert len(result[0]) == 6
-
-    def test_combine_truncates_to_action_dim(self):
-        arm = np.array([[1, 2, 3, 4, 5, 6]], dtype=np.float32)
-        grip = np.array([[0.5]], dtype=np.float32)
-        result = GR00TModel._combine_actions(arm, grip)
-        assert len(result[0]) == 6  # truncated from 7
-
-
-class TestGR00TReset:
-    def test_reset_stub_no_error(self, stub_model):
-        stub_model.reset()  # should not raise
-
-    def test_reset_restores_step(self, stub_model):
-        stub_model.predict(images={}, state=[0.0] * 6, task="test")
-        assert stub_model._step > 0
-        stub_model.reset()
-        assert stub_model._step == 0
-
-
-class TestGR00TLoadState:
-    def test_not_loaded_before_load(self):
-        model = GR00TModel(stub=True)
-        assert model.is_loaded is False
-
-    def test_loaded_after_load(self):
-        model = GR00TModel(stub=True)
         model.load()
-        assert model.is_loaded is True
+        return model
 
-    def test_predict_before_load_raises(self):
-        model = GR00TModel(stub=True)
-        with pytest.raises(RuntimeError, match="not loaded"):
-            model.predict(images={}, state=[0.0] * 6, task="test")
+    def test_load_pings_server(self, fake_server):
+        model = self._model(fake_server)
+        assert model.is_loaded
+        assert fake_server.requests[0]["endpoint"] == "ping"
 
-    def test_double_load_warns(self, stub_model, caplog):
-        import logging
+    def test_load_fails_fast_when_unreachable(self):
+        ctx = zmq.Context()
+        probe = ctx.socket(zmq.REP)
+        free_port = probe.bind_to_random_port("tcp://127.0.0.1")
+        probe.close(linger=0)
+        ctx.term()
 
-        with caplog.at_level(logging.WARNING):
-            stub_model.load()
-        assert "already loaded" in caplog.text
+        model = GR00TModel(host="127.0.0.1", port=free_port, timeout_ms=300)
+        with pytest.raises(RuntimeError, match="unreachable"):
+            model.load()
+
+    def test_predict_round_trip(self, fake_server, dummy_image_b64):
+        model = self._model(fake_server)
+        result = model.predict(
+            images={"front": dummy_image_b64},
+            state=[0.0] * 6,
+            task="pick up the cube",
+        )
+        assert len(result.actions) == CHUNK_SIZE
+        assert len(result.actions[0]) == ACTION_DIM
+        assert result.actions[0][-1] == 0.5  # gripper from fake server
+
+        req = fake_server.requests[-1]
+        assert req["endpoint"] == "get_action"
+        obs = req["data"]["observation"]
+        assert obs["video"]["front"].shape == (1, 1, 224, 224, 3)
+        assert obs["language"]["task"] == [["pick up the cube"]]
+
+    def test_api_token_sent_and_accepted(self, dummy_image_b64):
+        server = FakeGrootServer(api_token="sekret")
+        server.start()
+        try:
+            model = self._model(server, api_token="sekret")
+            result = model.predict(
+                images={"front": dummy_image_b64}, state=[0.0] * 6, task="t"
+            )
+            assert len(result.actions) == CHUNK_SIZE
+            assert all(r.get("api_token") == "sekret" for r in server.requests)
+        finally:
+            server.stop()
+
+    def test_wrong_api_token_raises(self):
+        server = FakeGrootServer(api_token="sekret")
+        server.start()
+        try:
+            model = GR00TModel(
+                host="127.0.0.1", port=server.port, timeout_ms=2000, api_token="wrong"
+            )
+            with pytest.raises(RuntimeError, match="unauthorized"):
+                model.load()  # ping already rejected
+        finally:
+            server.stop()
+
+    def test_reset_sends_reset_endpoint(self, fake_server):
+        model = self._model(fake_server)
+        model.reset()
+        assert fake_server.requests[-1]["endpoint"] == "reset"
+
+    def test_recovers_after_timeout(self, fake_server, dummy_image_b64):
+        """A REQ socket is dead after a timeout — verify we rebuild it."""
+        model = GR00TModel(host="127.0.0.1", port=fake_server.port, timeout_ms=300)
+        model.load()
+
+        fake_server.delay_next_s = 1.0  # outlives the client's 300ms RCVTIMEO
+        with pytest.raises(RuntimeError, match="not responding"):
+            model.predict(
+                images={"front": dummy_image_b64}, state=[0.0] * 6, task="t"
+            )
+
+        time.sleep(1.2)  # let the fake server flush its delayed (dropped) reply
+        result = model.predict(
+            images={"front": dummy_image_b64}, state=[0.0] * 6, task="t"
+        )
+        assert len(result.actions) == CHUNK_SIZE
+
+
+# ── Server integration (stub mode) ───────────────────────────────
 
 
 class TestServerWithGR00T:
@@ -196,7 +338,7 @@ class TestServerWithGR00T:
     @pytest.fixture
     def client(self, monkeypatch):
         monkeypatch.setenv("VLA_STUB", "true")
-        from server import ServerConfig, app, create_model
+        from server import ServerConfig, app
         from fastapi.testclient import TestClient
 
         cfg = ServerConfig(model="groot", stub=True, port=9998)
@@ -211,6 +353,7 @@ class TestServerWithGR00T:
         assert data["status"] == "ok"
         assert data["model_loaded"] is True
         assert data["model"] == "groot"
+        assert data["stub"] is True
 
     def test_config_groot(self, client):
         resp = client.get("/config")
@@ -258,3 +401,22 @@ class TestModelFactory:
         assert isinstance(model, GR00TModel)
         assert model.host == "192.168.1.100"
         assert model.port == 6666
+
+    def test_create_groot_from_config(self, monkeypatch):
+        monkeypatch.delenv("VLA_HOST", raising=False)
+        monkeypatch.delenv("VLA_ZMQ_PORT", raising=False)
+        monkeypatch.setenv("VLA_STUB", "true")
+        from server import ServerConfig, create_model
+
+        cfg = ServerConfig(
+            model="groot",
+            groot_host="10.0.0.7",
+            groot_port=7777,
+            groot_api_token="tok",
+            groot_video_key="ego_view",
+        )
+        model = create_model(cfg)
+        assert model.host == "10.0.0.7"
+        assert model.port == 7777
+        assert model.api_token == "tok"
+        assert model.video_key == "ego_view"
