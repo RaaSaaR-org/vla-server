@@ -86,6 +86,10 @@ class Pi05Model(VLAModel):
         return self._loaded
 
     @property
+    def is_stub(self) -> bool:
+        return True  # pi0.5 backend is stub-only until TASK-078
+
+    @property
     def active_adapter_id(self) -> str | None:
         return self._active_adapter_id
 

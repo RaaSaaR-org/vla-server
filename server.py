@@ -21,13 +21,14 @@ import argparse
 import asyncio
 import logging
 import os
+import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from models.base import VLAModel
@@ -61,6 +62,17 @@ class ServerConfig:
     rustfs_endpoint: str | None = None
     rustfs_access_key: str | None = None
     rustfs_secret_key: str | None = None
+    # Service token: require "Authorization: Bearer <auth_token>" on all
+    # endpoints except /health. None disables auth (dev only).
+    auth_token: str | None = None
+    # GR00T N1.7 PolicyServer connection (model: groot).
+    groot_host: str = "localhost"
+    groot_port: int = 5555
+    groot_api_token: str | None = None
+    groot_video_key: str = "front"
+    groot_state_keys: dict[str, int] | None = None  # e.g. {"single_arm": 5, "gripper": 1}
+    groot_action_keys: list[str] | None = None      # e.g. ["single_arm", "gripper"]
+    groot_timeout_ms: int = 15000
 
     @classmethod
     def from_yaml(cls, path: str | Path = "config.yaml") -> "ServerConfig":
@@ -108,6 +120,8 @@ class HealthResponse(BaseModel):
     model: str = ""
     model_loaded: bool = False
     device: str = ""
+    stub: bool = False
+    auth_enabled: bool = False
     active_adapter_id: str | None = None
 
 
@@ -141,10 +155,20 @@ def create_model(config: ServerConfig) -> VLAModel:
     if config.model == "groot":
         from models.groot import GR00TModel
 
-        host = os.environ.get("VLA_HOST", "localhost")
-        port = int(os.environ.get("VLA_ZMQ_PORT", "5555"))
+        host = os.environ.get("VLA_HOST", config.groot_host)
+        port = int(os.environ.get("VLA_ZMQ_PORT", str(config.groot_port)))
         stub = config.stub or os.environ.get("VLA_STUB", "").lower() in ("1", "true")
-        return GR00TModel(host=host, port=port, stub=stub)
+        api_token = os.environ.get("VLA_GROOT_API_TOKEN", config.groot_api_token)
+        return GR00TModel(
+            host=host,
+            port=port,
+            stub=stub,
+            api_token=api_token,
+            video_key=config.groot_video_key,
+            state_keys=config.groot_state_keys,
+            action_keys=config.groot_action_keys,
+            timeout_ms=config.groot_timeout_ms,
+        )
 
     if config.stub or config.model == "pi05":
         from models.pi05 import Pi05Model
@@ -176,6 +200,29 @@ config: ServerConfig | None = None
 model_lock: asyncio.Lock = asyncio.Lock()
 
 
+async def require_auth(authorization: str | None = Header(default=None)) -> None:
+    """Service-token check for every endpoint except /health.
+
+    Disabled when no auth_token is configured (a warning is logged at
+    startup). /health stays open for load balancers and Docker healthchecks
+    and never returns secrets.
+    """
+    expected = config.auth_token if config else None
+    if not expected:
+        return
+    provided = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        provided = authorization[7:].strip()
+    if not provided:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not secrets.compare_digest(provided, expected):
+        raise HTTPException(status_code=403, detail="Invalid token")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global engine, config
@@ -187,8 +234,14 @@ async def lifespan(app: FastAPI):
     logger.info(f"  Model:  {config.model} ({config.model_path})")
     logger.info(f"  Device: {config.device}")
     logger.info(f"  Stub:   {config.stub}")
+    logger.info(f"  Auth:   {'bearer token' if config.auth_token else 'DISABLED'}")
     logger.info(f"  Listen: {config.host}:{config.port}")
     logger.info("=" * 60)
+    if not config.auth_token:
+        logger.warning(
+            "No auth_token configured — API is unauthenticated. "
+            "Set auth_token in config.yaml or VLA_AUTH_TOKEN for production."
+        )
 
     try:
         engine.load()
@@ -216,11 +269,13 @@ async def health():
         model=config.model if config else "",
         model_loaded=engine is not None and engine.is_loaded,
         device=config.device if config else "",
+        stub=engine.is_stub if engine else False,
+        auth_enabled=bool(config.auth_token) if config else False,
         active_adapter_id=engine.active_adapter_id if engine else None,
     )
 
 
-@app.get("/config", response_model=ConfigResponse)
+@app.get("/config", response_model=ConfigResponse, dependencies=[Depends(require_auth)])
 async def get_config():
     if not engine or not engine.is_loaded:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -233,7 +288,7 @@ async def get_config():
     )
 
 
-@app.post("/predict", response_model=PredictResponse)
+@app.post("/predict", response_model=PredictResponse, dependencies=[Depends(require_auth)])
 async def predict(request: PredictRequest):
     if not engine or not engine.is_loaded:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -269,14 +324,18 @@ async def predict(request: PredictRequest):
     )
 
 
-@app.post("/reset")
+@app.post("/reset", dependencies=[Depends(require_auth)])
 async def reset_policy():
     if engine:
         engine.reset()
     return {"ok": True}
 
 
-@app.post("/load-adapter", response_model=LoadAdapterResponse)
+@app.post(
+    "/load-adapter",
+    response_model=LoadAdapterResponse,
+    dependencies=[Depends(require_auth)],
+)
 async def load_adapter(request: LoadAdapterRequest):
     """Hot-swap a LoRA adapter onto the loaded base model.
 
@@ -332,6 +391,8 @@ def main():
         cfg.model_path = env_model_path
     if env_port := os.environ.get("VLA_PORT"):
         cfg.port = int(env_port)
+    if env_auth_token := os.environ.get("VLA_AUTH_TOKEN"):
+        cfg.auth_token = env_auth_token
 
     if args.stub:
         cfg.stub = True

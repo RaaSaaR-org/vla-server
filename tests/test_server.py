@@ -118,6 +118,75 @@ class TestReset:
         assert resp1.json()["actions"] == resp2.json()["actions"]
 
 
+class TestAuth:
+    TOKEN = "test-service-token"
+
+    @pytest.fixture
+    def auth_client(self):
+        cfg = ServerConfig(model="pi05", stub=True, port=9999, auth_token=self.TOKEN)
+        app.state.config = cfg
+        with TestClient(app) as c:
+            yield c
+
+    def _headers(self, token: str | None = None) -> dict:
+        return {"Authorization": f"Bearer {token or self.TOKEN}"}
+
+    def test_health_open_without_token(self, auth_client):
+        resp = auth_client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["auth_enabled"] is True
+
+    def test_predict_requires_token(self, auth_client, dummy_image_b64):
+        resp = auth_client.post("/predict", json={
+            "images": {"front": dummy_image_b64},
+            "state": [0.0] * 6,
+            "task": "test",
+        })
+        assert resp.status_code == 401
+        assert resp.headers["WWW-Authenticate"] == "Bearer"
+
+    def test_predict_with_valid_token(self, auth_client, dummy_image_b64):
+        resp = auth_client.post("/predict", json={
+            "images": {"front": dummy_image_b64},
+            "state": [0.0] * 6,
+            "task": "test",
+        }, headers=self._headers())
+        assert resp.status_code == 200
+
+    def test_wrong_token_rejected(self, auth_client, dummy_image_b64):
+        resp = auth_client.post("/predict", json={
+            "images": {"front": dummy_image_b64},
+            "state": [0.0] * 6,
+            "task": "test",
+        }, headers=self._headers("wrong-token"))
+        assert resp.status_code == 403
+
+    def test_config_requires_token(self, auth_client):
+        assert auth_client.get("/config").status_code == 401
+        assert auth_client.get("/config", headers=self._headers()).status_code == 200
+
+    def test_reset_requires_token(self, auth_client):
+        assert auth_client.post("/reset").status_code == 401
+        assert auth_client.post("/reset", headers=self._headers()).status_code == 200
+
+    def test_load_adapter_requires_token(self, auth_client):
+        resp = auth_client.post("/load-adapter", json={"adapter_path": "/x"})
+        assert resp.status_code == 401
+
+    def test_no_token_configured_means_open(self, client, dummy_image_b64):
+        """Without auth_token, endpoints stay open (dev mode)."""
+        resp = client.post("/predict", json={
+            "images": {"front": dummy_image_b64},
+            "state": [0.0] * 6,
+            "task": "test",
+        })
+        assert resp.status_code == 200
+        assert client.get("/health").json()["auth_enabled"] is False
+
+    def test_health_reports_stub(self, client):
+        assert client.get("/health").json()["stub"] is True
+
+
 class TestModelFactory:
     def test_create_stub_model(self):
         cfg = ServerConfig(stub=True)

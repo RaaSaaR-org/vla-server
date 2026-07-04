@@ -3,7 +3,7 @@
 # Copy to config.yaml and adjust for your setup:
 #   cp config.yaml.example config.yaml
 
-# Model backend: "smolvla" or "pi05"
+# Model backend: "smolvla", "pi05" (stub), or "groot" (GR00T N1.7 via ZMQ)
 model: smolvla
 
 # HuggingFace repo ID or local checkpoint path
@@ -16,8 +16,33 @@ device: mps
 host: 0.0.0.0
 port: 8000
 
+# Service token — clients must send "Authorization: Bearer <token>".
+# /health stays open for healthchecks. Leave empty ONLY for local dev.
+# Generate one with: openssl rand -hex 32
+# Env override: VLA_AUTH_TOKEN
+auth_token: ""
+
 # Default task if none provided in /predict request
 default_task: "Pick up the object."
 
-# Stub mode: sine-wave actions, no ML dependencies (for testing)
+# Stub mode: sine-wave actions, no ML dependencies (for testing).
+# /health reports stub: true so clients can detect it.
 stub: false
+
+# ── GR00T N1.7 (model: groot) ────────────────────────────────────
+# Connects to an Isaac-GR00T PolicyServer (run_gr00t_server.py) over ZMQ.
+groot_host: localhost
+groot_port: 5555
+# Token for the ZMQ leg — pass the same value as --api-token to
+# run_gr00t_server.py. Env override: VLA_GROOT_API_TOKEN
+groot_api_token: ""
+# Modality keys must match the embodiment config of your fine-tuned
+# checkpoint (SO-101 defaults shown).
+groot_video_key: front
+groot_state_keys:
+  single_arm: 5
+  gripper: 1
+groot_action_keys:
+  - single_arm
+  - gripper
+groot_timeout_ms: 15000
