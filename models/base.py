@@ -74,6 +74,13 @@ class VLAModel(ABC):
         sine-wave output for a real policy."""
         return False
 
+    def close(self) -> None:
+        """Release backend resources (sockets, contexts). Idempotent.
+
+        Called on server shutdown; backends without external resources
+        can rely on this no-op default.
+        """
+
     def load_adapter(self, adapter_path: str, adapter_id: str | None = None) -> dict[str, Any]:
         """Hot-swap a LoRA adapter on top of the loaded base model.
 

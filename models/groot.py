@@ -42,7 +42,7 @@ IMAGE_SIZE = 224
 # Modality keys must match the embodiment config the checkpoint was
 # fine-tuned with (see Isaac-GR00T --embodiment-tag).
 DEFAULT_STATE_KEYS = {"single_arm": 5, "gripper": 1}
-DEFAULT_ACTION_KEYS = ["single_arm", "gripper"]
+DEFAULT_ACTION_KEYS = {"single_arm": 5, "gripper": 1}
 
 
 class GR00TModel(VLAModel):
@@ -56,8 +56,9 @@ class GR00TModel(VLAModel):
         api_token: str | None = None,
         video_key: str = "front",
         state_keys: dict[str, int] | None = None,
-        action_keys: list[str] | None = None,
+        action_keys: dict[str, int] | None = None,
         timeout_ms: int = 15000,
+        ping_retries: int = 3,
     ):
         self.host = host
         self.port = port
@@ -65,16 +66,22 @@ class GR00TModel(VLAModel):
         self.api_token = api_token
         self.video_key = video_key
         self.state_keys = dict(state_keys) if state_keys else dict(DEFAULT_STATE_KEYS)
-        self.action_keys = list(action_keys) if action_keys else list(DEFAULT_ACTION_KEYS)
+        self.action_keys = dict(action_keys) if action_keys else dict(DEFAULT_ACTION_KEYS)
         self.timeout_ms = timeout_ms
+        self.ping_retries = max(1, ping_retries)
         self._socket = None
         self._zmq_ctx = None
         self._loaded = False
         self._step = 0
+        self._warned_partial_state = False
 
     @property
     def _state_dim(self) -> int:
         return sum(self.state_keys.values())
+
+    @property
+    def _action_dim(self) -> int:
+        return sum(self.action_keys.values())
 
     def load(self) -> None:
         if self._loaded:
@@ -95,12 +102,31 @@ class GR00TModel(VLAModel):
 
         self._connect()
 
-        # Fail fast: verify the PolicyServer is actually reachable.
-        try:
-            pong = self._request("ping")
-        except RuntimeError as e:
+        # Verify the PolicyServer is reachable. Transport errors are retried
+        # (GPU side may boot slower than us); application errors like a bad
+        # api_token fail immediately since retrying cannot fix them.
+        pong = None
+        last_err: Exception | None = None
+        for attempt in range(1, self.ping_retries + 1):
+            try:
+                pong = self._request("ping")
+                break
+            except RuntimeError as e:
+                if "not responding" not in str(e):
+                    self.close()
+                    raise  # application-level error (e.g. bad token)
+                last_err = e
+                if attempt < self.ping_retries:
+                    logger.warning(
+                        f"GR00T ping {attempt}/{self.ping_retries} failed: {e}; "
+                        f"retrying in 2s"
+                    )
+                    time.sleep(2.0)
+        if pong is None:
+            self.close()
             raise RuntimeError(
-                f"GR00T PolicyServer at {self.host}:{self.port} unreachable: {e}"
+                f"GR00T PolicyServer at {self.host}:{self.port} unreachable "
+                f"after {self.ping_retries} attempts: {last_err}"
             )
         logger.info(f"GR00T PolicyServer ping: {pong}")
 
@@ -139,7 +165,7 @@ class GR00TModel(VLAModel):
 
     def info(self) -> ModelConfig:
         return ModelConfig(
-            action_dim=self._state_dim,
+            action_dim=self._action_dim,
             chunk_size=CHUNK_SIZE,
             cameras=[self.video_key],
             state_dim=self._state_dim,
@@ -152,6 +178,26 @@ class GR00TModel(VLAModel):
     @property
     def is_stub(self) -> bool:
         return self.stub
+
+    def close(self) -> None:
+        """Release the ZMQ socket and context. Idempotent.
+
+        Without this, a leaked context blocks forever in zmq's
+        Context.__del__ -> term() while its socket is still open.
+        """
+        self._loaded = False
+        if self._socket is not None:
+            try:
+                self._socket.close(linger=0)
+            except Exception:
+                pass
+            self._socket = None
+        if self._zmq_ctx is not None:
+            try:
+                self._zmq_ctx.term()
+            except Exception:
+                pass
+            self._zmq_ctx = None
 
     # ── ZMQ transport ────────────────────────────────────────────
 
@@ -249,7 +295,19 @@ class GR00TModel(VLAModel):
             # (H, W, 3) -> (1, 1, H, W, 3): batch + time dims
             obs["video"][self.video_key] = np.array(img, dtype=np.uint8)[None, None]
 
-        # Zero-pad short state vectors so every key gets its full dim
+        # Never fabricate a robot pose: an empty state must fail loudly
+        # instead of silently becoming an all-zero joint configuration.
+        if not state:
+            raise ValueError(
+                "state must be a non-empty list of joint positions "
+                f"(expected {self._state_dim} values)"
+            )
+        if len(state) < self._state_dim and not self._warned_partial_state:
+            self._warned_partial_state = True
+            logger.warning(
+                f"state has {len(state)} values, expected {self._state_dim}; "
+                f"zero-padding missing joints (logged once)"
+            )
         padded = list(state) + [0.0] * max(0, self._state_dim - len(state))
         offset = 0
         for name, dim in self.state_keys.items():
@@ -262,9 +320,14 @@ class GR00TModel(VLAModel):
     # ── Action parsing ───────────────────────────────────────────
 
     def _parse_action(self, action: dict) -> list[list[float]]:
-        """Concatenate (B, T, D) action arrays into (horizon, action_dim) rows."""
+        """Concatenate (B, T, D) action arrays into (horizon, action_dim) rows.
+
+        Each key's width is validated against action_keys — a checkpoint
+        returning unexpected dims must error, not silently mis-align
+        joint commands.
+        """
         parts: list[np.ndarray] = []
-        for key in self.action_keys:
+        for key, dim in self.action_keys.items():
             if key not in action:
                 raise RuntimeError(
                     f"GR00T response missing action key '{key}' "
@@ -274,7 +337,14 @@ class GR00TModel(VLAModel):
             if arr.ndim == 3:
                 arr = arr[0]  # first batch
             elif arr.ndim == 1:
-                arr = arr.reshape(-1, 1)
+                # Disambiguate a squeezed 1-D array by the known width:
+                # (T,) for a 1-dim action, (D,) for a single step otherwise
+                arr = arr.reshape(-1, 1) if dim == 1 else arr.reshape(1, -1)
+            if arr.ndim != 2 or arr.shape[1] != dim:
+                raise RuntimeError(
+                    f"GR00T action '{key}' has shape "
+                    f"{np.asarray(action[key]).shape}, expected (*, {dim})"
+                )
             parts.append(arr)
 
         horizon = min(p.shape[0] for p in parts)
@@ -291,7 +361,7 @@ class GR00TModel(VLAModel):
             action = [
                 (state[j] if j < len(state) else 0.0)
                 + 2.0 * math.sin(2.0 * math.pi * 0.1 * t + j * 0.5)
-                for j in range(self._state_dim)
+                for j in range(self._action_dim)
             ]
             actions.append(action)
         self._step += CHUNK_SIZE

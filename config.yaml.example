@@ -43,6 +43,9 @@ groot_state_keys:
   single_arm: 5
   gripper: 1
 groot_action_keys:
-  - single_arm
-  - gripper
+  single_arm: 5
+  gripper: 1
 groot_timeout_ms: 15000
+# Startup ping attempts (2s apart) before giving up — raise this if the
+# GPU-side PolicyServer boots slower than vla-server.
+groot_ping_retries: 3

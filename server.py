@@ -70,9 +70,10 @@ class ServerConfig:
     groot_port: int = 5555
     groot_api_token: str | None = None
     groot_video_key: str = "front"
-    groot_state_keys: dict[str, int] | None = None  # e.g. {"single_arm": 5, "gripper": 1}
-    groot_action_keys: list[str] | None = None      # e.g. ["single_arm", "gripper"]
+    groot_state_keys: dict[str, int] | None = None   # e.g. {"single_arm": 5, "gripper": 1}
+    groot_action_keys: dict[str, int] | None = None  # e.g. {"single_arm": 5, "gripper": 1}
     groot_timeout_ms: int = 15000
+    groot_ping_retries: int = 3  # startup ping attempts (2s apart) before giving up
 
     @classmethod
     def from_yaml(cls, path: str | Path = "config.yaml") -> "ServerConfig":
@@ -168,6 +169,7 @@ def create_model(config: ServerConfig) -> VLAModel:
             state_keys=config.groot_state_keys,
             action_keys=config.groot_action_keys,
             timeout_ms=config.groot_timeout_ms,
+            ping_retries=config.groot_ping_retries,
         )
 
     if config.stub or config.model == "pi05":
@@ -219,7 +221,9 @@ async def require_auth(authorization: str | None = Header(default=None)) -> None
             detail="Missing bearer token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    if not secrets.compare_digest(provided, expected):
+    # Compare as bytes: compare_digest raises TypeError on non-ASCII str,
+    # which would turn a bad token into a 500 instead of a 403.
+    if not secrets.compare_digest(provided.encode(), expected.encode()):
         raise HTTPException(status_code=403, detail="Invalid token")
 
 
@@ -252,6 +256,7 @@ async def lifespan(app: FastAPI):
 
     yield
     logger.info("Shutting down.")
+    engine.close()
     engine = None
 
 
@@ -293,6 +298,14 @@ async def predict(request: PredictRequest):
     if not engine or not engine.is_loaded:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
+    # An empty state must never reach a backend — zero-padding it would
+    # fabricate a robot pose and produce confident-but-wrong actions.
+    if not request.state:
+        raise HTTPException(
+            status_code=422,
+            detail="state must be a non-empty list of joint positions",
+        )
+
     images = request.resolved_images()
 
     # Validate that all required cameras are present (extra cameras like wrist are OK)
@@ -326,8 +339,12 @@ async def predict(request: PredictRequest):
 
 @app.post("/reset", dependencies=[Depends(require_auth)])
 async def reset_policy():
+    # Under model_lock and off the event loop: GR00T reset does a ZMQ
+    # round-trip that must not interleave with an in-flight /predict on
+    # the same (non-thread-safe) socket, nor block /health.
     if engine:
-        engine.reset()
+        async with model_lock:
+            await asyncio.to_thread(engine.reset)
     return {"ok": True}
 
 

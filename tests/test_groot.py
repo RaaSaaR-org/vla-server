@@ -1,8 +1,9 @@
 """
 Tests for GR00T N1.7 model backend.
 
-Stub tests need no deps; protocol tests run a minimal in-process
-Isaac-GR00T PolicyServer emulator over real ZMQ (loopback).
+Stub and parsing tests need no ZMQ deps; wire-protocol tests run a minimal
+in-process Isaac-GR00T PolicyServer emulator over real ZMQ (loopback) and
+are skipped when the groot extras are not installed.
 """
 
 import base64
@@ -16,9 +17,16 @@ from PIL import Image
 
 from models.groot import ACTION_DIM, CHUNK_SIZE, GR00TModel
 
-zmq = pytest.importorskip("zmq")
-import msgpack  # noqa: E402
-import msgpack_numpy as msgpack_np  # noqa: E402
+try:
+    import msgpack
+    import msgpack_numpy as msgpack_np
+    import zmq
+except ImportError:
+    zmq = None
+
+requires_zmq = pytest.mark.skipif(
+    zmq is None, reason="pyzmq/msgpack not installed (groot extras)"
+)
 
 
 @pytest.fixture
@@ -149,12 +157,52 @@ class TestGR00TInfo:
             stub=True,
             video_key="ego_view",
             state_keys={"left_arm": 7, "right_arm": 7},
-            action_keys=["left_arm", "right_arm"],
+            action_keys={"left_arm": 7, "right_arm": 7},
         )
         info = model.info()
         assert info.cameras == ["ego_view"]
         assert info.state_dim == 14
         assert info.action_dim == 14
+
+    def test_info_action_dim_independent_of_state(self):
+        """Extra state-only keys must not inflate action_dim."""
+        model = GR00TModel(
+            stub=True,
+            state_keys={"single_arm": 5, "gripper": 1, "base_pose": 3},
+            action_keys={"single_arm": 5, "gripper": 1},
+        )
+        info = model.info()
+        assert info.state_dim == 9
+        assert info.action_dim == 6
+
+
+class TestGR00TLoadState:
+    def test_not_loaded_before_load(self):
+        model = GR00TModel(stub=True)
+        assert model.is_loaded is False
+
+    def test_loaded_after_load(self):
+        model = GR00TModel(stub=True)
+        model.load()
+        assert model.is_loaded is True
+
+    def test_predict_before_load_raises(self):
+        model = GR00TModel(stub=True)
+        with pytest.raises(RuntimeError, match="not loaded"):
+            model.predict(images={}, state=[0.0] * 6, task="test")
+
+    def test_double_load_warns(self, stub_model, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            stub_model.load()
+        assert "already loaded" in caplog.text
+
+    def test_reset_restores_step(self, stub_model):
+        stub_model.predict(images={}, state=[0.0] * 6, task="test")
+        assert stub_model._step > 0
+        stub_model.reset()
+        assert stub_model._step == 0
 
 
 # ── Observation building (N1.7 nested format) ────────────────────
@@ -204,6 +252,11 @@ class TestGR00TBuildObservation:
             obs["state"]["gripper"][0, 0], np.array([0.0], dtype=np.float32)
         )
 
+    def test_observation_empty_state_raises(self, stub_model):
+        """An empty state must never become a fabricated all-zero pose."""
+        with pytest.raises(ValueError, match="non-empty"):
+            stub_model._build_observation(images={}, state=[], task="test")
+
     def test_observation_no_image(self, stub_model):
         obs = stub_model._build_observation(images={}, state=[0.0] * 6, task="test")
         assert obs["video"] == {}
@@ -236,15 +289,46 @@ class TestGR00TParseAction:
         with pytest.raises(RuntimeError, match="missing action key"):
             stub_model._parse_action({"single_arm": np.zeros((1, 4, 5))})
 
+    def test_parse_wrong_width_raises(self, stub_model):
+        """A checkpoint returning unexpected dims must error, not mis-align."""
+        action = {
+            "single_arm": np.zeros((1, 4, 6), dtype=np.float32),  # 6 != 5
+            "gripper": np.zeros((1, 4, 1), dtype=np.float32),
+        }
+        with pytest.raises(RuntimeError, match="expected"):
+            stub_model._parse_action(action)
+
+    def test_parse_squeezed_single_step(self, stub_model):
+        """A squeezed (D,) single-step arm action is one row, not D rows."""
+        action = {
+            "single_arm": np.array([1, 2, 3, 4, 5], dtype=np.float32),  # (5,)
+            "gripper": np.array([0.5], dtype=np.float32),               # (1,)
+        }
+        rows = stub_model._parse_action(action)
+        assert len(rows) == 1
+        assert rows[0] == [1.0, 2.0, 3.0, 4.0, 5.0, 0.5]
+
 
 # ── Wire-protocol tests against the fake PolicyServer ────────────
 
 
+@requires_zmq
 class TestGR00TProtocol:
+    @pytest.fixture(autouse=True)
+    def _track_models(self):
+        """Close every model after the test — a leaked ZMQ context blocks
+        the whole process in Context.__del__ -> term()."""
+        self._models: list[GR00TModel] = []
+        yield
+        for model in self._models:
+            model.close()
+
     def _model(self, server: FakeGrootServer, **kwargs) -> GR00TModel:
         model = GR00TModel(
-            host="127.0.0.1", port=server.port, timeout_ms=2000, **kwargs
+            host="127.0.0.1", port=server.port, timeout_ms=2000,
+            ping_retries=1, **kwargs
         )
+        self._models.append(model)
         model.load()
         return model
 
@@ -260,7 +344,10 @@ class TestGR00TProtocol:
         probe.close(linger=0)
         ctx.term()
 
-        model = GR00TModel(host="127.0.0.1", port=free_port, timeout_ms=300)
+        model = GR00TModel(
+            host="127.0.0.1", port=free_port, timeout_ms=300, ping_retries=1
+        )
+        self._models.append(model)
         with pytest.raises(RuntimeError, match="unreachable"):
             model.load()
 
@@ -299,10 +386,15 @@ class TestGR00TProtocol:
         server.start()
         try:
             model = GR00TModel(
-                host="127.0.0.1", port=server.port, timeout_ms=2000, api_token="wrong"
+                host="127.0.0.1", port=server.port, timeout_ms=2000,
+                api_token="wrong", ping_retries=3,
             )
+            self._models.append(model)
+            # Auth errors must fail immediately, not burn ping retries
+            t0 = time.monotonic()
             with pytest.raises(RuntimeError, match="unauthorized"):
                 model.load()  # ping already rejected
+            assert time.monotonic() - t0 < 1.5
         finally:
             server.stop()
 
@@ -313,7 +405,10 @@ class TestGR00TProtocol:
 
     def test_recovers_after_timeout(self, fake_server, dummy_image_b64):
         """A REQ socket is dead after a timeout — verify we rebuild it."""
-        model = GR00TModel(host="127.0.0.1", port=fake_server.port, timeout_ms=300)
+        model = GR00TModel(
+            host="127.0.0.1", port=fake_server.port, timeout_ms=300, ping_retries=1
+        )
+        self._models.append(model)
         model.load()
 
         fake_server.delay_next_s = 1.0  # outlives the client's 300ms RCVTIMEO

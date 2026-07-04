@@ -84,6 +84,16 @@ class TestPredict:
         })
         assert resp.status_code == 422
 
+    def test_predict_empty_state_rejected(self, client, dummy_image_b64):
+        """Empty state must 422, never be zero-padded into a fake pose."""
+        resp = client.post("/predict", json={
+            "images": {"front": dummy_image_b64},
+            "state": [],
+            "task": "test",
+        })
+        assert resp.status_code == 422
+        assert "non-empty" in resp.json()["detail"]
+
     def test_predict_multiple_calls(self, client, dummy_image_b64):
         """Verify actions change between calls (not constant)."""
         payload = {
@@ -159,6 +169,14 @@ class TestAuth:
             "state": [0.0] * 6,
             "task": "test",
         }, headers=self._headers("wrong-token"))
+        assert resp.status_code == 403
+
+    def test_non_ascii_token_rejected_cleanly(self, auth_client):
+        """Non-ASCII bearer token must yield 403, not a compare_digest 500."""
+        resp = auth_client.post(
+            "/reset",
+            headers={"Authorization": "Bearer tökén".encode("latin-1")},
+        )
         assert resp.status_code == 403
 
     def test_config_requires_token(self, auth_client):
