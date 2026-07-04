@@ -1,0 +1,86 @@
+name: Release (CalVer)
+
+# Publish step of the release-please-style CalVer flow. Runs on every push to
+# main; acts ONLY when the top CHANGELOG version has no tag yet — i.e. right
+# after the "Prepare Release PR" PR is merged. It then tags `vYYYY.MM.DD`,
+# creates the GitHub Release from the CHANGELOG section, and builds + publishes
+# a versioned container image in the same run.
+#
+# Normal feature merges are no-ops here (top version is already tagged).
+# workflow_dispatch is kept as a manual fallback to publish a pending version.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Tag + GitHub Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+      release: ${{ steps.detect.outputs.release }}
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect pending release
+        id: detect
+        run: |
+          set -euo pipefail
+          TAG="$(grep -m1 -oE 'v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?' CHANGELOG.md || true)"
+          if [ -z "$TAG" ]; then
+            echo "No version header in CHANGELOG."; echo "release=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "$TAG already tagged — nothing to publish."
+            echo "release=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "Publishing $TAG"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes
+        if: steps.detect.outputs.release == 'true'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.detect.outputs.tag }}"
+          awk -v v="$TAG" '
+            $0 ~ "^## \\["v"\\]" {f=1; next}
+            /^## \[/ && f {exit}
+            f {print}
+          ' CHANGELOG.md > /tmp/notes.md
+          echo "----- notes -----"; cat /tmp/notes.md
+
+      - name: Tag + create GitHub Release
+        if: steps.detect.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.detect.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/notes.md
+
+  # Build + publish a versioned image in the SAME run (a tag pushed by
+  # GITHUB_TOKEN can't trigger build-images.yml's `on: push: tags`).
+  images:
+    name: Build & publish image
+    needs: publish
+    if: needs.publish.outputs.release == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/build-images.yml
+    with:
+      version: ${{ needs.publish.outputs.version }}
