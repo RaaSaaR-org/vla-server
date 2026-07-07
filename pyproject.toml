@@ -17,6 +17,9 @@ dependencies = [
 smolvla = [
     "torch>=2.1.0",
     "opencv-python>=4.8.0",
+    # LeRobot is on PyPI since v0.6.0 (was: source install). The base
+    # package is lightweight; policy/dataset deps live behind extras.
+    "lerobot[smolvla,dataset]>=0.6.0",
 ]
 # Install GR00T deps: uv pip install -e ".[groot]"
 groot = [
@@ -29,10 +32,6 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
-
-# NOTE: LeRobot must be installed separately for real model inference:
-#   git clone https://github.com/huggingface/lerobot.git
-#   cd lerobot && uv pip install -e ".[smolvla]"
 
 [build-system]
 requires = ["setuptools>=68.0"]
