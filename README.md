@@ -17,14 +17,9 @@ Consolidated VLA inference server for NeoDEM. Replaces the previous `smolvla-ser
 ```bash
 cd vla-server
 
-# Create venv and install base deps
+# Create venv and install deps (pulls LeRobot ≥0.6.0 from PyPI)
 uv venv && source .venv/bin/activate
 uv pip install -e ".[smolvla]"
-
-# Install LeRobot with SmolVLA support
-git clone https://github.com/huggingface/lerobot.git /tmp/lerobot
-cd /tmp/lerobot && uv pip install -e ".[smolvla]"
-cd -
 
 # Configure
 cp config.yaml.example config.yaml
@@ -40,12 +35,7 @@ uv run python server.py
 cd vla-server
 
 uv venv && source .venv/bin/activate
-uv pip install -e ".[smolvla]"
-
-# Install LeRobot
-git clone https://github.com/huggingface/lerobot.git /tmp/lerobot
-cd /tmp/lerobot && uv pip install -e ".[smolvla]"
-cd -
+uv pip install -e ".[smolvla]"   # pulls LeRobot ≥0.6.0 from PyPI
 
 # Configure
 cp config.yaml.example config.yaml
