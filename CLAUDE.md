@@ -26,4 +26,6 @@ pytest tests/
 
 - Runs on port 8000 by default
 - Config via `config.yaml` or env vars (`VLA_DEVICE`, `VLA_MODEL`, etc.)
+- Stub action dimension is configurable: `action_dim` in config.yaml or
+  `VLA_ACTION_DIM` env var (default 6 = SO-101; use 29 for Unitree G1)
 - LeRobot must be installed from source for real inference (not on PyPI)

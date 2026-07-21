@@ -55,6 +55,14 @@ uv pip install -e .
 uv run python server.py --stub
 ```
 
+The stub defaults to 6-dim actions (SO-101). For other embodiments set the
+action dimension via `action_dim` in `config.yaml` or `VLA_ACTION_DIM` —
+e.g. a Unitree G1 (29 DoF) sim rollout:
+
+```bash
+VLA_ACTION_DIM=29 uv run python server.py --stub
+```
+
 ## Authentication (Service Token)
 
 Set a service token in `config.yaml` (`auth_token: "<token>"`) or via
@@ -169,6 +177,7 @@ VLA_MODEL=groot VLA_STUB=true uv run python server.py
 | `VLA_ZMQ_PORT`        | GR00T ZMQ server port           | from config.yaml |
 | `VLA_GROOT_API_TOKEN` | GR00T PolicyServer API token    | from config.yaml |
 | `VLA_STUB`            | Force stub mode (`true`/`1`)    | `false`          |
+| `VLA_ACTION_DIM`      | Stub action dimension (pi05)    | `6` (SO-101); `29` for G1 |
 
 ## Tests
 
