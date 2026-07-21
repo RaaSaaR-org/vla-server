@@ -11,9 +11,9 @@ Wire protocol (Isaac-GR00T gr00t/policy/server_client.py):
 - Arrays travel as msgpack_numpy (the server refuses pickle payloads)
 
 Observation format (N1.7, batch B=1, time T=1):
-    {"video":    {<camera>: (1, 1, H, W, 3) uint8},
+    {"video":    {<camera>: (1, 1, H, W, 3) uint8},   # one entry per video_keys
      "state":    {<name>:   (1, 1, D) float32},
-     "language": {"task":   [[str]]}}
+     "language": {<language_key>: [[str]]}}           # language_key default "task"
 Action response: {<name>: (B, T, D) float32} — keys concatenated in
 action_keys order into (horizon, action_dim) rows.
 
@@ -59,12 +59,25 @@ class GR00TModel(VLAModel):
         action_keys: dict[str, int] | None = None,
         timeout_ms: int = 15000,
         ping_retries: int = 3,
+        video_keys: list[str] | None = None,
+        language_key: str = "task",
+        image_size: int | None = IMAGE_SIZE,
     ):
         self.host = host
         self.port = port
         self.stub = stub
         self.api_token = api_token
-        self.video_key = video_key
+        # video_keys (multi-camera) wins over the legacy single video_key;
+        # video_key stays as a back-compat alias for the first camera.
+        self.video_keys = list(video_keys) if video_keys else [video_key]
+        self.video_key = self.video_keys[0]
+        # Language key inside the observation. Checkpoints fine-tuned with a
+        # custom modality config (e.g. g1_dex3) expect
+        # "annotation.human.task_description" — the GR00T server asserts on
+        # a mismatch in strict mode.
+        self.language_key = language_key
+        # Square resize edge for camera frames; None sends native resolution.
+        self.image_size = image_size
         self.state_keys = dict(state_keys) if state_keys else dict(DEFAULT_STATE_KEYS)
         self.action_keys = dict(action_keys) if action_keys else dict(DEFAULT_ACTION_KEYS)
         self.timeout_ms = timeout_ms
@@ -167,7 +180,7 @@ class GR00TModel(VLAModel):
         return ModelConfig(
             action_dim=self._action_dim,
             chunk_size=CHUNK_SIZE,
-            cameras=[self.video_key],
+            cameras=list(self.video_keys),
             state_dim=self._state_dim,
         )
 
@@ -282,18 +295,18 @@ class GR00TModel(VLAModel):
         obs: dict = {
             "video": {},
             "state": {},
-            "language": {"task": [[task]]},
+            "language": {self.language_key: [[task]]},
         }
 
-        if self.video_key in images:
-            img_bytes = base64.b64decode(images[self.video_key])
-            img = (
-                Image.open(io.BytesIO(img_bytes))
-                .convert("RGB")
-                .resize((IMAGE_SIZE, IMAGE_SIZE))
-            )
+        for key in self.video_keys:
+            if key not in images:
+                continue
+            img_bytes = base64.b64decode(images[key])
+            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            if self.image_size is not None:
+                img = img.resize((self.image_size, self.image_size))
             # (H, W, 3) -> (1, 1, H, W, 3): batch + time dims
-            obs["video"][self.video_key] = np.array(img, dtype=np.uint8)[None, None]
+            obs["video"][key] = np.array(img, dtype=np.uint8)[None, None]
 
         # Never fabricate a robot pose: an empty state must fail loudly
         # instead of silently becoming an all-zero joint configuration.

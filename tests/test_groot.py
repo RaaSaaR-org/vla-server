@@ -37,13 +37,18 @@ def stub_model() -> GR00TModel:
     return model
 
 
-@pytest.fixture
-def dummy_image_b64() -> str:
-    """Create a minimal valid JPEG as base64."""
-    img = Image.new("RGB", (64, 64), color=(128, 128, 128))
+def make_image_b64(width: int, height: int, color: tuple[int, int, int]) -> str:
+    """Create a solid-color JPEG of the given size as base64."""
+    img = Image.new("RGB", (width, height), color=color)
     buf = io.BytesIO()
     img.save(buf, format="JPEG")
     return base64.b64encode(buf.getvalue()).decode()
+
+
+@pytest.fixture
+def dummy_image_b64() -> str:
+    """Create a minimal valid JPEG as base64."""
+    return make_image_b64(64, 64, (128, 128, 128))
 
 
 # ── Fake Isaac-GR00T PolicyServer ────────────────────────────────
@@ -164,6 +169,28 @@ class TestGR00TInfo:
         assert info.state_dim == 14
         assert info.action_dim == 14
 
+    def test_info_cameras_multi(self):
+        model = GR00TModel(
+            stub=True, video_keys=["cam_left_high", "cam_right_high"]
+        )
+        info = model.info()
+        assert info.cameras == ["cam_left_high", "cam_right_high"]
+
+    def test_video_keys_wins_over_video_key(self):
+        model = GR00TModel(
+            stub=True, video_key="front", video_keys=["cam_right_high"]
+        )
+        assert model.video_keys == ["cam_right_high"]
+        assert model.video_key == "cam_right_high"  # back-compat alias
+        assert model.info().cameras == ["cam_right_high"]
+
+    def test_single_video_key_back_compat(self):
+        """Legacy single video_key constructor arg is unchanged."""
+        model = GR00TModel(stub=True, video_key="ego_view")
+        assert model.video_key == "ego_view"
+        assert model.video_keys == ["ego_view"]
+        assert model.info().cameras == ["ego_view"]
+
     def test_info_action_dim_independent_of_state(self):
         """Extra state-only keys must not inflate action_dim."""
         model = GR00TModel(
@@ -261,6 +288,70 @@ class TestGR00TBuildObservation:
         obs = stub_model._build_observation(images={}, state=[0.0] * 6, task="test")
         assert obs["video"] == {}
         assert "single_arm" in obs["state"]
+
+    def test_observation_multi_camera_independent_decode(self):
+        """Every configured camera is forwarded, each decoded on its own."""
+        model = GR00TModel(
+            stub=True, video_keys=["cam_left_high", "cam_right_high"]
+        )
+        model.load()
+        images = {
+            "cam_left_high": make_image_b64(64, 64, (250, 0, 0)),
+            "cam_right_high": make_image_b64(32, 32, (0, 0, 250)),
+        }
+        obs = model._build_observation(images=images, state=[0.0] * 6, task="t")
+        assert set(obs["video"].keys()) == {"cam_left_high", "cam_right_high"}
+        left = obs["video"]["cam_left_high"]
+        right = obs["video"]["cam_right_high"]
+        assert left.shape == (1, 1, 224, 224, 3)
+        assert right.shape == (1, 1, 224, 224, 3)
+        # Independent decode: red frame vs blue frame, not the same buffer
+        assert left[0, 0, 0, 0, 0] > left[0, 0, 0, 0, 2]   # red > blue
+        assert right[0, 0, 0, 0, 2] > right[0, 0, 0, 0, 0]  # blue > red
+
+    def test_observation_multi_camera_missing_one_skipped(self):
+        model = GR00TModel(
+            stub=True, video_keys=["cam_left_high", "cam_right_high"]
+        )
+        model.load()
+        images = {"cam_right_high": make_image_b64(64, 64, (0, 250, 0))}
+        obs = model._build_observation(images=images, state=[0.0] * 6, task="t")
+        assert list(obs["video"].keys()) == ["cam_right_high"]
+
+    def test_observation_image_size_none_passthrough(self):
+        """image_size=None must keep the native resolution (no resize)."""
+        model = GR00TModel(
+            stub=True, video_keys=["cam_right_high"], image_size=None
+        )
+        model.load()
+        # PIL size is (W, H) = (640, 480) -> array (H, W, 3) = (480, 640, 3)
+        images = {"cam_right_high": make_image_b64(640, 480, (10, 20, 30))}
+        obs = model._build_observation(images=images, state=[0.0] * 6, task="t")
+        assert obs["video"]["cam_right_high"].shape == (1, 1, 480, 640, 3)
+        assert obs["video"]["cam_right_high"].dtype == np.uint8
+
+    def test_observation_custom_image_size(self):
+        model = GR00TModel(stub=True, image_size=96)
+        model.load()
+        obs = model._build_observation(
+            images={"front": make_image_b64(640, 480, (1, 2, 3))},
+            state=[0.0] * 6,
+            task="t",
+        )
+        assert obs["video"]["front"].shape == (1, 1, 96, 96, 3)
+
+    def test_observation_custom_language_key(self):
+        model = GR00TModel(
+            stub=True, language_key="annotation.human.task_description"
+        )
+        model.load()
+        obs = model._build_observation(
+            images={}, state=[0.0] * 6, task="Put the bottle into the plate."
+        )
+        assert obs["language"] == {
+            "annotation.human.task_description": [["Put the bottle into the plate."]]
+        }
+        assert "task" not in obs["language"]
 
 
 # ── Action parsing ───────────────────────────────────────────────
@@ -398,6 +489,44 @@ class TestGR00TProtocol:
         finally:
             server.stop()
 
+    def test_language_key_round_trip(self, fake_server, dummy_image_b64):
+        """The wire observation must carry the configured language key."""
+        model = self._model(
+            fake_server,
+            language_key="annotation.human.task_description",
+        )
+        result = model.predict(
+            images={"front": dummy_image_b64},
+            state=[0.0] * 6,
+            task="Put the bottle into the plate.",
+        )
+        assert len(result.actions) == CHUNK_SIZE
+
+        req = fake_server.requests[-1]
+        assert req["endpoint"] == "get_action"
+        obs = req["data"]["observation"]
+        assert obs["language"]["annotation.human.task_description"] == [
+            ["Put the bottle into the plate."]
+        ]
+        assert "task" not in obs["language"]
+
+    def test_multi_camera_native_resolution_round_trip(self, fake_server):
+        """Two cameras at image_size=None arrive unresized on the wire."""
+        model = self._model(
+            fake_server,
+            video_keys=["cam_left_high", "cam_right_high"],
+            image_size=None,
+        )
+        images = {
+            "cam_left_high": make_image_b64(640, 480, (250, 0, 0)),
+            "cam_right_high": make_image_b64(640, 480, (0, 0, 250)),
+        }
+        model.predict(images=images, state=[0.0] * 6, task="t")
+
+        obs = fake_server.requests[-1]["data"]["observation"]
+        assert obs["video"]["cam_left_high"].shape == (1, 1, 480, 640, 3)
+        assert obs["video"]["cam_right_high"].shape == (1, 1, 480, 640, 3)
+
     def test_reset_sends_reset_endpoint(self, fake_server):
         model = self._model(fake_server)
         model.reset()
@@ -515,3 +644,65 @@ class TestModelFactory:
         assert model.port == 7777
         assert model.api_token == "tok"
         assert model.video_key == "ego_view"
+        assert model.video_keys == ["ego_view"]
+        assert model.language_key == "task"
+        assert model.image_size == 224
+
+    def test_create_groot_g1_dex3_fields(self, monkeypatch):
+        monkeypatch.delenv("VLA_HOST", raising=False)
+        monkeypatch.delenv("VLA_ZMQ_PORT", raising=False)
+        monkeypatch.setenv("VLA_STUB", "true")
+        from server import ServerConfig, create_model
+
+        cfg = ServerConfig(
+            model="groot",
+            groot_video_keys=["cam_left_high", "cam_right_high"],
+            groot_language_key="annotation.human.task_description",
+            groot_image_size=None,
+            groot_state_keys={"arms": 14, "hands": 14},
+            groot_action_keys={"arms": 14, "hands": 14},
+        )
+        model = create_model(cfg)
+        assert model.video_keys == ["cam_left_high", "cam_right_high"]
+        assert model.language_key == "annotation.human.task_description"
+        assert model.image_size is None
+        info = model.info()
+        assert info.cameras == ["cam_left_high", "cam_right_high"]
+        assert info.state_dim == 28
+        assert info.action_dim == 28
+
+
+class TestG1Dex3ConfigFiles:
+    """The shipped configs/ files must load into the intended contract."""
+
+    @staticmethod
+    def _load(name: str):
+        from pathlib import Path
+
+        from server import ServerConfig
+
+        path = Path(__file__).resolve().parent.parent / "configs" / name
+        assert path.exists(), f"missing config file: {path}"
+        return ServerConfig.from_yaml(path)
+
+    def test_1cam_config(self):
+        cfg = self._load("g1_dex3_1cam.yaml")
+        assert cfg.model == "groot"
+        assert cfg.port == 8000
+        assert cfg.groot_host == "localhost"
+        assert cfg.groot_port == 6555
+        assert cfg.groot_video_keys == ["cam_right_high"]
+        assert cfg.groot_language_key == "annotation.human.task_description"
+        assert cfg.groot_image_size is None  # YAML null = native resolution
+        assert cfg.groot_state_keys == {"arms": 14, "hands": 14}
+        assert cfg.groot_action_keys == {"arms": 14, "hands": 14}
+        assert cfg.default_task == "Put the bottle into the plate."
+
+    def test_2cam_config(self):
+        cfg = self._load("g1_dex3_2cam.yaml")
+        assert cfg.model == "groot"
+        assert cfg.groot_video_keys == ["cam_left_high", "cam_right_high"]
+        assert cfg.groot_language_key == "annotation.human.task_description"
+        assert cfg.groot_image_size is None
+        assert cfg.groot_state_keys == {"arms": 14, "hands": 14}
+        assert cfg.groot_action_keys == {"arms": 14, "hands": 14}

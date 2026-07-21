@@ -33,12 +33,20 @@ stub: false
 # Connects to an Isaac-GR00T PolicyServer (run_gr00t_server.py) over ZMQ.
 groot_host: localhost
 groot_port: 5555
-# Token for the ZMQ leg — pass the same value as --api-token to
-# run_gr00t_server.py. Env override: VLA_GROOT_API_TOKEN
+# Token for the ZMQ leg. NOTE: upstream gr00t.eval.run_gr00t_server has NO
+# --api-token flag — leave this empty unless your PolicyServer variant
+# enforces a token. Env override: VLA_GROOT_API_TOKEN
 groot_api_token: ""
 # Modality keys must match the embodiment config of your fine-tuned
 # checkpoint (SO-101 defaults shown).
 groot_video_key: front
+# Multi-camera alternative — wins over groot_video_key when set, e.g.:
+# groot_video_keys: [cam_left_high, cam_right_high]
+# Language key inside the observation. Custom modality configs (e.g. the
+# g1_dex3 embodiment) may need "annotation.human.task_description".
+groot_language_key: task
+# Square resize edge for camera frames; null = send native resolution.
+groot_image_size: 224
 groot_state_keys:
   single_arm: 5
   gripper: 1

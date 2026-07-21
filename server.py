@@ -70,6 +70,15 @@ class ServerConfig:
     groot_port: int = 5555
     groot_api_token: str | None = None
     groot_video_key: str = "front"
+    # Multi-camera list — wins over groot_video_key when set (e.g.
+    # ["cam_left_high", "cam_right_high"]). None -> [groot_video_key].
+    groot_video_keys: list[str] | None = None
+    # Language key inside the GR00T observation; checkpoints trained with a
+    # custom modality config may need "annotation.human.task_description".
+    groot_language_key: str = "task"
+    # Square resize edge for camera frames sent to GR00T. YAML null (None)
+    # disables resizing and sends the native resolution.
+    groot_image_size: int | None = 224
     groot_state_keys: dict[str, int] | None = None   # e.g. {"single_arm": 5, "gripper": 1}
     groot_action_keys: dict[str, int] | None = None  # e.g. {"single_arm": 5, "gripper": 1}
     groot_timeout_ms: int = 15000
@@ -166,6 +175,9 @@ def create_model(config: ServerConfig) -> VLAModel:
             stub=stub,
             api_token=api_token,
             video_key=config.groot_video_key,
+            video_keys=config.groot_video_keys,
+            language_key=config.groot_language_key,
+            image_size=config.groot_image_size,
             state_keys=config.groot_state_keys,
             action_keys=config.groot_action_keys,
             timeout_ms=config.groot_timeout_ms,
