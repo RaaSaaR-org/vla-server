@@ -128,9 +128,12 @@ git clone https://github.com/NVIDIA/Isaac-GR00T.git && cd Isaac-GR00T
 uv run python gr00t/eval/run_gr00t_server.py \
     --embodiment-tag NEW_EMBODIMENT \
     --model-path /path/to/so101-finetuned-checkpoint \
-    --device cuda:0 --host 0.0.0.0 --port 5555 \
-    --api-token "<zmq-token>"
+    --device cuda:0 --host 0.0.0.0 --port 5555
 ```
+
+> Note: upstream `gr00t.eval.run_gr00t_server` has **no** `--api-token`
+> flag. Leave `groot_api_token` empty unless you run a PolicyServer variant
+> that enforces a token; run the ZMQ leg inside a private network instead.
 
 Base model: [nvidia/GR00T-N1.7-3B](https://huggingface.co/nvidia/GR00T-N1.7-3B) —
 fine-tune on your SO-101 dataset first; the modality keys
@@ -154,6 +157,43 @@ cannot be reused after an error).
 
 ```bash
 VLA_MODEL=groot VLA_STUB=true uv run python server.py
+```
+
+### Unitree G1 EDU + Dex3-1 (embodiment `g1_dex3`)
+
+Ready-made configs for GR00T-N1.7 checkpoints fine-tuned on the
+`Unitree_G1_Dex3` dataset live in `configs/`:
+
+| Config | Cameras | Checkpoint example |
+|--------|---------|--------------------|
+| `configs/g1_dex3_1cam.yaml` | `cam_right_high` | `n187_real_only_14k` |
+| `configs/g1_dex3_2cam.yaml` | `cam_left_high` + `cam_right_high` | `n188_2cam_14k/checkpoint-8000` (⚠ checkpoint-10000 is truncated — don't auto-pick) |
+
+Policy contract (from the checkpoint's `experiment_cfg`):
+
+- **State**: `arms` (14) + `hands` (14) = 28-dim float32 joint **positions**
+  in radians — no velocities. Arms = left shoulder pitch/roll/yaw, elbow,
+  wrist roll/pitch/yaw, then right (same 7). Hands = Dex3 joints with a
+  real left/right ordering asymmetry (see comments in the config files).
+- **Action**: 28-dim **absolute** joint-position targets, same order,
+  chunk length 16.
+- **Camera frames**: native 480x640 RGB — `groot_image_size: null`
+  disables the client-side 224x224 resize.
+- **Language key**: `annotation.human.task_description` (the GR00T server
+  asserts / KeyErrors on the default `task` key with these checkpoints).
+- **Task instruction**: `"Put the bottle into the plate."` (exact string,
+  trailing period).
+
+Run it (the `--config` flag replaces the default `config.yaml`; all keys in
+the file map 1:1 onto `ServerConfig` fields, unknown keys are ignored, and
+`VLA_*` env variables still override afterwards):
+
+```bash
+# 1) GPU side — serve the checkpoint in WSL:
+wsl.exe -d g1-eval -- bash -lc "bash /mnt/c/Unitree/_data/task185_serve_n17.sh n187_real_only_14k 6555"
+
+# 2) HTTP side — this repo:
+python server.py --config configs/g1_dex3_1cam.yaml
 ```
 
 ## Environment Variables

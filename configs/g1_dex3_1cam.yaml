@@ -1,0 +1,51 @@
+# Unitree G1 EDU + Dex3-1 (embodiment "g1_dex3") — single camera.
+#
+# Matches checkpoints fine-tuned with the g1_dex3 modality config on the
+# Unitree_G1_Dex3 dataset (e.g. n187_real_only_14k):
+#   - state:  arms(14) + hands(14) = 28-dim float32 joint POSITIONS [rad]
+#   - action: 28-dim ABSOLUTE joint-position targets, same order, chunk 16
+#   - one camera "cam_right_high", NATIVE 480x640 RGB (no client-side resize)
+#   - language key "annotation.human.task_description"
+#   - task instruction: "Put the bottle into the plate."
+#
+# Joint order (Unitree_G1_Dex3): arms idx0-13 = L shoulder pitch/roll/yaw,
+# elbow, wrist roll/pitch/yaw, then R same 7. hands idx14-27 = LEFT dex3
+# thumb_0, thumb_1, thumb_2, middle_0, middle_1, index_0, index_1; RIGHT dex3
+# thumb_0, thumb_1, thumb_2, index_0, index_1, middle_0, middle_1
+# (the left/right asymmetry is real — from unitree_lerobot G1_DEX3_CONFIG).
+#
+# Start the GR00T PolicyServer first (WSL, from Windows):
+#   wsl.exe -d g1-eval -- bash -lc "bash /mnt/c/Unitree/_data/task185_serve_n17.sh n187_real_only_14k 6555"
+#
+# Then run this HTTP server:
+#   python server.py --config configs/g1_dex3_1cam.yaml
+
+model: groot
+host: 0.0.0.0
+port: 8000
+
+default_task: "Put the bottle into the plate."
+
+# GR00T PolicyServer (ZMQ) connection
+groot_host: localhost
+groot_port: 6555
+
+# Cameras: exactly one, at native resolution — the checkpoint's processor
+# does its own resizing; a client-side 224x224 squash loses detail.
+groot_video_keys:
+  - cam_right_high
+groot_image_size: null  # null = send native 480x640, do NOT resize
+
+# The g1_dex3 modality config uses the annotation-style language key; the
+# GR00T server asserts / KeyErrors if plain "task" is sent.
+groot_language_key: annotation.human.task_description
+
+groot_state_keys:
+  arms: 14
+  hands: 14
+groot_action_keys:
+  arms: 14
+  hands: 14
+
+groot_timeout_ms: 15000
+groot_ping_retries: 3
