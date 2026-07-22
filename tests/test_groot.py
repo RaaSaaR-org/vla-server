@@ -61,13 +61,21 @@ class FakeGrootServer(threading.Thread):
     get_action returns (action_dict, info_dict); errors as {"error": str}.
     """
 
-    def __init__(self, api_token: str | None = None, horizon: int = CHUNK_SIZE):
+    def __init__(
+        self,
+        api_token: str | None = None,
+        horizon: int = CHUNK_SIZE,
+        action_factory=None,
+    ):
         super().__init__(daemon=True)
         self.ctx = zmq.Context()
         self.socket = self.ctx.socket(zmq.REP)
         self.port = self.socket.bind_to_random_port("tcp://127.0.0.1")
         self.api_token = api_token
         self.horizon = horizon
+        # Optional () -> action_dict override for get_action responses
+        # (e.g. embodiments other than the SO-101 default below).
+        self.action_factory = action_factory
         self.requests: list[dict] = []
         self.delay_next_s: float = 0.0
         self._stop_event = threading.Event()
@@ -101,6 +109,8 @@ class FakeGrootServer(threading.Thread):
         if endpoint == "reset":
             return {"status": "reset"}
         if endpoint == "get_action":
+            if self.action_factory is not None:
+                return [self.action_factory(), {}]
             action = {
                 "single_arm": np.arange(self.horizon * 5, dtype=np.float32).reshape(
                     1, self.horizon, 5
@@ -389,6 +399,24 @@ class TestGR00TParseAction:
         with pytest.raises(RuntimeError, match="expected"):
             stub_model._parse_action(action)
 
+    def test_parse_extra_keys_ignored_and_order_kept(self, stub_model):
+        """Response keys not in action_keys (navigate_command, effort_*, ...)
+        must be ignored — only configured keys, in config order, reach the
+        flat action."""
+        action = {
+            # extra keys first so dict order cannot mask a selection bug
+            "navigate_command": np.full((1, 4, 3), 9.0, dtype=np.float32),
+            "effort_single_arm": np.full((1, 4, 5), 9.0, dtype=np.float32),
+            "gripper": np.full((1, 4, 1), 0.5, dtype=np.float32),
+            "single_arm": np.ones((1, 4, 5), dtype=np.float32),
+            "base_height_command": np.full((1, 4, 1), 9.0, dtype=np.float32),
+        }
+        rows = stub_model._parse_action(action)
+        assert len(rows) == 4
+        # config order (single_arm, gripper) wins over response dict order
+        assert rows[0] == [1.0, 1.0, 1.0, 1.0, 1.0, 0.5]
+        assert all(9.0 not in row for row in rows)
+
     def test_parse_squeezed_single_step(self, stub_model):
         """A squeezed (D,) single-step arm action is one row, not D rows."""
         action = {
@@ -553,6 +581,135 @@ class TestGR00TProtocol:
         assert len(result.actions) == CHUNK_SIZE
 
 
+# ── Apple-to-plate contract (g1_apple_pnp) ───────────────────────
+
+# Mirrors configs/g1_apple_pnp.yaml + C:\Unitree\_data\apple_pnp\CONTRACT.md
+APPLE_STATE_KEYS = {
+    "left_leg": 6,
+    "right_leg": 6,
+    "waist": 3,
+    "left_arm": 7,
+    "right_arm": 7,
+    "left_hand": 7,
+    "right_hand": 7,
+}  # 43-dim
+APPLE_ACTION_KEYS = {
+    "left_arm": 7,
+    "right_arm": 7,
+    "left_hand": 7,
+    "right_hand": 7,
+    "waist": 3,
+}  # 31-dim
+APPLE_TASK = "move the apple to the plate"
+
+
+def make_apple_action(horizon: int = CHUNK_SIZE) -> dict:
+    """PolicyServer response for the apple checkpoint: the 5 configured
+    action keys (distinct fill values so concatenation order is provable)
+    PLUS the extra keys the real checkpoint also returns."""
+    action = {
+        # extras interleaved first — dict order must not matter
+        "navigate_command": np.full((1, horizon, 3), 9.0, dtype=np.float32),
+        "base_height_command": np.full((1, horizon, 1), 9.0, dtype=np.float32),
+        "left_arm": np.full((1, horizon, 7), 1.0, dtype=np.float32),
+        "effort_left_arm": np.full((1, horizon, 7), 9.0, dtype=np.float32),
+        "right_arm": np.full((1, horizon, 7), 2.0, dtype=np.float32),
+        "effort_right_arm": np.full((1, horizon, 7), 9.0, dtype=np.float32),
+        "left_hand": np.full((1, horizon, 7), 3.0, dtype=np.float32),
+        "effort_left_hand": np.full((1, horizon, 7), 9.0, dtype=np.float32),
+        "right_hand": np.full((1, horizon, 7), 4.0, dtype=np.float32),
+        "effort_right_hand": np.full((1, horizon, 7), 9.0, dtype=np.float32),
+        "waist": np.full((1, horizon, 3), 5.0, dtype=np.float32),
+        "effort_waist": np.full((1, horizon, 3), 9.0, dtype=np.float32),
+    }
+    return action
+
+
+@requires_zmq
+class TestGR00TApplePnpContract:
+    """End-to-end wire contract for the apple-to-plate embodiment."""
+
+    @pytest.fixture(autouse=True)
+    def _track_models(self):
+        self._models: list[GR00TModel] = []
+        yield
+        for model in self._models:
+            model.close()
+
+    @pytest.fixture
+    def apple_server(self):
+        server = FakeGrootServer(action_factory=make_apple_action)
+        server.start()
+        yield server
+        server.stop()
+
+    def _model(self, server: FakeGrootServer) -> GR00TModel:
+        model = GR00TModel(
+            host="127.0.0.1",
+            port=server.port,
+            timeout_ms=2000,
+            ping_retries=1,
+            video_keys=["ego_view"],
+            language_key="annotation.human.task_description",
+            image_size=None,
+            state_keys=APPLE_STATE_KEYS,
+            action_keys=APPLE_ACTION_KEYS,
+        )
+        self._models.append(model)
+        model.load()
+        return model
+
+    def test_apple_round_trip(self, apple_server):
+        model = self._model(apple_server)
+        # 43 distinct values so each state.<key> slice is provable
+        state = [float(i) for i in range(43)]
+        result = model.predict(
+            images={"ego_view": make_image_b64(640, 480, (200, 30, 30))},
+            state=state,
+            task=APPLE_TASK,
+        )
+
+        # ── what the PolicyServer received ──
+        req = apple_server.requests[-1]
+        assert req["endpoint"] == "get_action"
+        obs = req["data"]["observation"]
+        offset = 0
+        for name, dim in APPLE_STATE_KEYS.items():
+            assert obs["state"][name].shape == (1, 1, dim), name
+            np.testing.assert_array_equal(
+                obs["state"][name][0, 0],
+                np.arange(offset, offset + dim, dtype=np.float32),
+            )
+            offset += dim
+        assert offset == 43
+        # native 640x480 -> array (H, W, 3) = (480, 640, 3), no resize
+        assert obs["video"]["ego_view"].shape == (1, 1, 480, 640, 3)
+        assert obs["language"] == {
+            "annotation.human.task_description": [[APPLE_TASK]]
+        }
+        assert "task" not in obs["language"]
+
+        # ── what the client returned ──
+        assert len(result.actions) == CHUNK_SIZE
+        assert all(len(row) == 31 for row in result.actions)
+        row = result.actions[0]
+        assert row[0:7] == [1.0] * 7      # left_arm
+        assert row[7:14] == [2.0] * 7     # right_arm
+        assert row[14:21] == [3.0] * 7    # left_hand
+        assert row[21:28] == [4.0] * 7    # right_hand
+        assert row[28:31] == [5.0] * 3    # waist
+        # extra keys (navigate/base_height/effort_*, all 9.0) never leak in
+        assert all(9.0 not in r for r in result.actions)
+
+    def test_apple_info_dims(self, apple_server):
+        model = self._model(apple_server)
+        info = model.info()
+        assert info.state_dim == 43
+        assert info.action_dim == 31
+        assert info.cameras == ["ego_view"]
+        assert info.chunk_size == CHUNK_SIZE
+
+
 # ── Server integration (stub mode) ───────────────────────────────
 
 
@@ -706,3 +863,26 @@ class TestG1Dex3ConfigFiles:
         assert cfg.groot_image_size is None
         assert cfg.groot_state_keys == {"arms": 14, "hands": 14}
         assert cfg.groot_action_keys == {"arms": 14, "hands": 14}
+
+    def test_apple_pnp_config(self):
+        cfg = self._load("g1_apple_pnp.yaml")
+        assert cfg.model == "groot"
+        assert cfg.port == 8000
+        assert cfg.groot_host == "localhost"
+        assert cfg.groot_port == 6555
+        assert cfg.groot_video_keys == ["ego_view"]
+        assert cfg.groot_language_key == "annotation.human.task_description"
+        assert cfg.groot_image_size is None  # native 640x480 passthrough
+        assert cfg.groot_state_keys == APPLE_STATE_KEYS
+        assert cfg.groot_action_keys == APPLE_ACTION_KEYS
+        # dict ORDER is the wire contract — flat state/action slice layout
+        assert list(cfg.groot_state_keys) == [
+            "left_leg", "right_leg", "waist",
+            "left_arm", "right_arm", "left_hand", "right_hand",
+        ]
+        assert list(cfg.groot_action_keys) == [
+            "left_arm", "right_arm", "left_hand", "right_hand", "waist",
+        ]
+        assert sum(cfg.groot_state_keys.values()) == 43
+        assert sum(cfg.groot_action_keys.values()) == 31
+        assert cfg.default_task == "move the apple to the plate"

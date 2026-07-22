@@ -176,6 +176,7 @@ Ready-made configs for GR00T-N1.7 checkpoints fine-tuned on the
 |--------|---------|--------------------|
 | `configs/g1_dex3_1cam.yaml` | `cam_right_high` | `n187_real_only_14k` |
 | `configs/g1_dex3_2cam.yaml` | `cam_left_high` + `cam_right_high` | `n188_2cam_14k/checkpoint-8000` (⚠ checkpoint-10000 is truncated — don't auto-pick) |
+| `configs/g1_apple_pnp.yaml` | `ego_view` | apple-to-plate finetune, `_ft_out/apple_pnp/checkpoint-<N>` (see below) |
 
 Policy contract (from the checkpoint's `experiment_cfg`):
 
@@ -202,6 +203,31 @@ wsl.exe -d g1-eval -- bash -lc "bash /mnt/c/Unitree/_data/task185_serve_n17.sh n
 
 # 2) HTTP side — this repo:
 python server.py --config configs/g1_dex3_1cam.yaml
+```
+
+### Apple-to-plate (embodiment `new_embodiment`, `configs/g1_apple_pnp.yaml`)
+
+NVIDIA GR00T-N1.7-AppleToPlate recipe (G1 EDU + Dex3-1). Contract
+(`C:\Unitree\_data\apple_pnp\CONTRACT.md` is authoritative):
+
+- **State**: 43-dim positions [rad] —
+  `left_leg(6) | right_leg(6) | waist(3) | left_arm(7) | right_arm(7) | left_hand(7) | right_hand(7)`.
+- **Action**: 31-dim flat targets, chunk 16 —
+  `left_arm(7) | right_arm(7) | left_hand(7) | right_hand(7) | waist(3)`.
+  The checkpoint also returns `navigate_command`, `base_height_command` and
+  `effort_*` keys; only the 5 configured keys are selected (extras ignored,
+  legs never commanded).
+- **Camera**: single `ego_view`, native 640x480 RGB (`groot_image_size: null`).
+- **Language key**: `annotation.human.task_description`; task string
+  `"move the apple to the plate"` (exact, no period).
+
+```powershell
+# 1) GPU side — serve the checkpoint (groot conda env,
+#    C:\Users\sebastian.heusser\.conda\envs\groot\python.exe):
+python -m gr00t.eval.run_gr00t_server --model-path C:\Unitree\_ft_out\apple_pnp\checkpoint-<N> --embodiment-tag new_embodiment --port 6555
+
+# 2) HTTP side — this repo:
+python server.py --config configs/g1_apple_pnp.yaml
 ```
 
 ## Environment Variables

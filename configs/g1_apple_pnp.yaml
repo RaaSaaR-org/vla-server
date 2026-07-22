@@ -1,0 +1,75 @@
+# Unitree G1 EDU + Dex3-1 — apple-to-plate (NVIDIA GR00T-N1.7-AppleToPlate recipe).
+#
+# Matches checkpoints fine-tuned from the nvidia/GR00T-N1.7-AppleToPlate
+# dataset (LeRobot v2.1, 402 real-robot teleop episodes) with embodiment tag
+# "new_embodiment" (our local finetune: C:\Unitree\_ft_out\apple_pnp):
+#   - state:  43-dim float32 joint POSITIONS [rad]:
+#     [left_leg 0:6 | right_leg 6:12 | waist 12:15 | left_arm 15:22 |
+#      right_arm 22:29 | left_hand 29:36 | right_hand 36:43]
+#   - action: 31-dim flat position targets, chunk 16:
+#     [left_arm 7 | right_arm 7 | left_hand 7 | right_hand 7 | waist 3]
+#     The PolicyServer additionally returns navigate_command,
+#     base_height_command and effort_* keys — those are intentionally NOT
+#     configured below, so the backend ignores them (legs are never
+#     commanded; efforts unused).
+#   - one camera "ego_view", NATIVE 640x480 RGB (no client-side resize),
+#     head-mounted RealSense D435 view of the tabletop
+#   - language key "annotation.human.task_description"
+#   - task instruction: "move the apple to the plate"
+#
+# Joint orders: legs (each) = hip_pitch, hip_roll, hip_yaw, knee,
+# ankle_pitch, ankle_roll; waist = yaw, roll, pitch; arms (each) =
+# shoulder_pitch, shoulder_roll, shoulder_yaw, elbow, wrist_roll,
+# wrist_pitch, wrist_yaw; hands = Dex3-1, 7 joints each (Unitree SDK
+# rt/dex3/*/state order). See C:\Unitree\_data\apple_pnp\CONTRACT.md.
+#
+# Start the GR00T PolicyServer first (native Windows, groot conda env —
+# python at C:\Users\sebastian.heusser\.conda\envs\groot\python.exe):
+#   python -m gr00t.eval.run_gr00t_server ^
+#       --model-path C:\Unitree\_ft_out\apple_pnp\checkpoint-<N> ^
+#       --embodiment-tag new_embodiment --port 6555
+#
+# Then run this HTTP server:
+#   python server.py --config configs/g1_apple_pnp.yaml
+
+model: groot
+host: 0.0.0.0
+port: 8000
+
+default_task: "move the apple to the plate"
+
+# GR00T PolicyServer (ZMQ) connection
+groot_host: localhost
+groot_port: 6555
+
+# Cameras: exactly one, at native resolution — the checkpoint's processor
+# does its own resizing; a client-side 224x224 squash loses detail.
+groot_video_keys:
+  - ego_view
+groot_image_size: null  # null = send native 640x480, do NOT resize
+
+# The new_embodiment modality config uses the annotation-style language key;
+# the GR00T server asserts / KeyErrors if plain "task" is sent.
+groot_language_key: annotation.human.task_description
+
+# 43-dim state — order matters (dict order = flat-state slice order).
+groot_state_keys:
+  left_leg: 6
+  right_leg: 6
+  waist: 3
+  left_arm: 7
+  right_arm: 7
+  left_hand: 7
+  right_hand: 7
+
+# 31-dim flat action — only these 5 keys, in exactly this order; extra
+# response keys (navigate_command, base_height_command, effort_*) are ignored.
+groot_action_keys:
+  left_arm: 7
+  right_arm: 7
+  left_hand: 7
+  right_hand: 7
+  waist: 3
+
+groot_timeout_ms: 15000
+groot_ping_retries: 3
