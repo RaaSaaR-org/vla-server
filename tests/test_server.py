@@ -224,6 +224,62 @@ class TestModelFactory:
             create_model(cfg)
 
 
+class TestConfigurableActionDim:
+    """Configurable stub action dimension (e.g. 29 for the Unitree G1)."""
+
+    def test_pi05_action_dim_29(self):
+        from models.pi05 import Pi05Model
+
+        model = Pi05Model(action_dim=29)
+        model.load()
+        result = model.predict({"front": ""}, [0.0] * 29, "walk forward")
+        assert len(result.actions) == 50
+        assert all(len(a) == 29 for a in result.actions)
+        info = model.info()
+        assert info.action_dim == 29
+        assert info.state_dim == 29
+
+    def test_env_var_honored_via_create_model(self, monkeypatch):
+        """VLA_ACTION_DIM flows through ServerConfig/create_model to the stub."""
+        from models.pi05 import Pi05Model
+
+        monkeypatch.setenv("VLA_ACTION_DIM", "29")
+        cfg = ServerConfig(model="pi05", stub=True)
+        model = create_model(cfg)
+        assert isinstance(model, Pi05Model)
+        model.load()
+        assert model.info().action_dim == 29
+        assert len(model.predict({"front": ""}, [0.0] * 29, "t").actions[0]) == 29
+
+    def test_explicit_param_beats_env(self, monkeypatch):
+        from models.pi05 import Pi05Model
+
+        monkeypatch.setenv("VLA_ACTION_DIM", "29")
+        model = Pi05Model(action_dim=12)
+        assert model.info().action_dim == 12
+
+    def test_garbage_env_falls_back_to_default(self, monkeypatch):
+        from models.pi05 import Pi05Model
+
+        monkeypatch.setenv("VLA_ACTION_DIM", "banana")
+        assert Pi05Model().info().action_dim == 6
+        monkeypatch.setenv("VLA_ACTION_DIM", "-3")
+        assert Pi05Model().info().action_dim == 6
+
+    def test_dim29_reset_determinism(self):
+        """reset() restarts the 29-dim sine sequence identically."""
+        from models.pi05 import Pi05Model
+
+        model = Pi05Model(action_dim=29)
+        model.load()
+        first = model.predict({"front": ""}, [0.0] * 29, "t").actions
+        second = model.predict({"front": ""}, [0.0] * 29, "t").actions
+        assert first != second  # step counter advances
+        model.reset()
+        again = model.predict({"front": ""}, [0.0] * 29, "t").actions
+        assert first == again
+
+
 class TestPredictMultiCamera:
     def test_predict_with_images_dict(self, client, dummy_image_b64):
         """POST with images dict containing front + wrist cameras."""

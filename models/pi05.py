@@ -10,20 +10,50 @@ For now, this can run in stub mode, producing sine-wave actions for testing.
 
 import logging
 import math
+import os
 import time
 
 from .base import ModelConfig, PredictResult, VLAModel
 
 logger = logging.getLogger(__name__)
 
-# SO-101 defaults
-ACTION_DIM = 6
+# SO-101 default (6 joints); G1 sim rollouts use 29. Override via the
+# action_dim constructor param or the VLA_ACTION_DIM env var.
+DEFAULT_ACTION_DIM = 6
 CHUNK_SIZE = 50
 
-# Sine-wave stub parameters (realistic resting pose)
+# Sine-wave stub parameters (realistic resting pose). For action dims > 6
+# the pattern repeats via j % len(...) with a per-index phase shift.
 _OFFSETS = [0.0, -0.5, 1.0, -0.3, 0.0, 0.5]
 _AMPLITUDES = [0.20, 0.30, 0.25, 0.15, 0.35, 0.40]
 _FREQUENCIES = [0.10, 0.15, 0.20, 0.30, 0.50, 0.70]
+
+
+def _resolve_action_dim(action_dim: int | None) -> int:
+    """Resolve the action dimension.
+
+    Order: explicit param -> VLA_ACTION_DIM env var -> DEFAULT_ACTION_DIM.
+    Non-integer or non-positive values fall back to the default with a
+    logged warning instead of crashing the server.
+    """
+    raw: object = action_dim if action_dim is not None else os.environ.get("VLA_ACTION_DIM")
+    if raw is None:
+        return DEFAULT_ACTION_DIM
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            f"Invalid action_dim {raw!r} (expected positive int); "
+            f"falling back to {DEFAULT_ACTION_DIM}"
+        )
+        return DEFAULT_ACTION_DIM
+    if value <= 0:
+        logger.warning(
+            f"action_dim must be positive, got {value}; "
+            f"falling back to {DEFAULT_ACTION_DIM}"
+        )
+        return DEFAULT_ACTION_DIM
+    return value
 
 
 class Pi05Model(VLAModel):
@@ -32,9 +62,15 @@ class Pi05Model(VLAModel):
     TODO(TASK-078): Replace with real pi0.5 LeRobot policy loading.
     """
 
-    def __init__(self, model_path: str = "", device: str = "cpu"):
+    def __init__(
+        self,
+        model_path: str = "",
+        device: str = "cpu",
+        action_dim: int | None = None,
+    ):
         self.model_path = model_path
         self.device = device
+        self._action_dim = _resolve_action_dim(action_dim)
         self._loaded = False
         self._step = 0
         self._active_adapter_id: str | None = None
@@ -42,7 +78,10 @@ class Pi05Model(VLAModel):
     def load(self) -> None:
         self._loaded = True
         self._step = 0
-        logger.info("Pi05Model loaded (stub mode — sine-wave actions)")
+        logger.info(
+            f"Pi05Model loaded (stub mode — sine-wave actions, "
+            f"action_dim={self._action_dim})"
+        )
 
     def predict(
         self,
@@ -56,13 +95,14 @@ class Pi05Model(VLAModel):
         t_start = time.perf_counter()
         actions: list[list[float]] = []
 
+        n = len(_OFFSETS)
         for i in range(CHUNK_SIZE):
             t = (self._step + i) / 30.0
             action = [
-                _OFFSETS[j] + _AMPLITUDES[j] * math.sin(
-                    2.0 * math.pi * _FREQUENCIES[j] * t + j * 0.5
+                _OFFSETS[j % n] + _AMPLITUDES[j % n] * math.sin(
+                    2.0 * math.pi * _FREQUENCIES[j % n] * t + j * 0.5
                 )
-                for j in range(ACTION_DIM)
+                for j in range(self._action_dim)
             ]
             actions.append(action)
 
@@ -75,10 +115,10 @@ class Pi05Model(VLAModel):
 
     def info(self) -> ModelConfig:
         return ModelConfig(
-            action_dim=ACTION_DIM,
+            action_dim=self._action_dim,
             chunk_size=CHUNK_SIZE,
             cameras=["front"],
-            state_dim=6,
+            state_dim=self._action_dim,
         )
 
     @property

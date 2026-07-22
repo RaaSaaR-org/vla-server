@@ -51,6 +51,9 @@ class ServerConfig:
     port: int = 8000
     default_task: str = "Pick up the object."
     stub: bool = False
+    # Stub action dimension (pi05 backend). None -> VLA_ACTION_DIM env var
+    # -> default 6 (SO-101). Set 29 for Unitree G1 sim rollouts.
+    action_dim: int | None = None
     # LoRA adapter (s3:// URI, local dir, or .tar.gz). Wraps base with PeftModel.
     adapter_path: str | None = None
     # Dataset stats.json for MEAN_STD un-normalization of actions.
@@ -186,7 +189,11 @@ def create_model(config: ServerConfig) -> VLAModel:
 
     if config.stub or config.model == "pi05":
         from models.pi05 import Pi05Model
-        return Pi05Model(model_path=config.model_path, device=config.device)
+        return Pi05Model(
+            model_path=config.model_path,
+            device=config.device,
+            action_dim=config.action_dim,
+        )
 
     if config.model == "smolvla":
         from models.smolvla import SmolVLAModel
@@ -422,6 +429,14 @@ def main():
         cfg.port = int(env_port)
     if env_auth_token := os.environ.get("VLA_AUTH_TOKEN"):
         cfg.auth_token = env_auth_token
+    if env_action_dim := os.environ.get("VLA_ACTION_DIM"):
+        try:
+            cfg.action_dim = int(env_action_dim)
+        except ValueError:
+            logger.warning(
+                f"Invalid VLA_ACTION_DIM {env_action_dim!r}; "
+                "keeping configured action_dim"
+            )
 
     if args.stub:
         cfg.stub = True
