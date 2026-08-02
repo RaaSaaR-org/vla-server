@@ -1,7 +1,7 @@
 """
 Tests for the VLA inference server.
 
-Uses the pi05 stub model (no ML dependencies required).
+Uses the dependency-free stub backend (models/stub.py).
 """
 
 import base64
@@ -18,7 +18,7 @@ from server import ServerConfig, app, create_model
 @pytest.fixture
 def client():
     """Create a test client with stub model."""
-    cfg = ServerConfig(model="pi05", stub=True, port=9999)
+    cfg = ServerConfig(model="stub", stub=True, port=9999)
     app.state.config = cfg
     with TestClient(app) as c:
         yield c
@@ -70,7 +70,7 @@ class TestPredict:
         assert resp.status_code == 200
         data = resp.json()
         assert "actions" in data
-        assert len(data["actions"]) == 50  # pi05 chunk_size
+        assert len(data["actions"]) == 50  # stub chunk_size
         assert len(data["actions"][0]) == 6  # action_dim
         assert "timestamp" in data
         assert "inference_time_ms" in data
@@ -133,7 +133,7 @@ class TestAuth:
 
     @pytest.fixture
     def auth_client(self):
-        cfg = ServerConfig(model="pi05", stub=True, port=9999, auth_token=self.TOKEN)
+        cfg = ServerConfig(model="stub", stub=True, port=9999, auth_token=self.TOKEN)
         app.state.config = cfg
         with TestClient(app) as c:
             yield c
@@ -209,8 +209,8 @@ class TestModelFactory:
     def test_create_stub_model(self):
         cfg = ServerConfig(stub=True)
         model = create_model(cfg)
-        from models.pi05 import Pi05Model
-        assert isinstance(model, Pi05Model)
+        from models.stub import StubModel
+        assert isinstance(model, StubModel)
 
     def test_create_pi05_model(self):
         cfg = ServerConfig(model="pi05")
