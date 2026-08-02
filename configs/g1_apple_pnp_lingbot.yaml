@@ -1,0 +1,105 @@
+# Unitree G1 EDU + Dex3-1 — apple-to-plate, LingBot-VLA 2.0 (Robbyant/Ant Group).
+#
+# Same task, same /predict contract and same 43-dim state as
+# configs/g1_apple_pnp.yaml (GR00T) — so eval/run_apple_eval.py and
+# eval/compare_runs.py work against either server unchanged. Only the
+# backend differs: LingBot speaks msgpack over a WebSocket, GR00T over ZMQ.
+#
+# Contract (C:\Unitree\_data\apple_pnp\CONTRACT.md is authoritative):
+#   - state:  43-dim float32 joint POSITIONS [rad]
+#     [left_leg 0:6 | right_leg 6:12 | waist 12:15 | left_arm 15:22 |
+#      right_arm 22:29 | left_hand 29:36 | right_hand 36:43]
+#   - action: 31-dim flat position targets
+#     [left_arm 7 | right_arm 7 | left_hand 7 | right_hand 7 | waist 3]
+#     action[29:36] is a normalised GRIP CODE, not radians.
+#   - one camera "ego_view", native 640x480 RGB
+#   - task instruction: "move the apple to the plate"
+#
+# Differences to the GR00T cell of the benchmark — both belong in any
+# comparison of the two numbers:
+#   - chunk 50 instead of 16
+#   - the mapping lives on the LingBot side in
+#     lingbot-vla-v2/configs/robot_configs/g1_dex3_apple.yaml, which encodes
+#     the arm action as a DELTA (subtract_state: true, relative_type: joint)
+#     and re-adds the state in unapply()
+#   - no norm stats are published for the base checkpoint, so a "zero-shot"
+#     run imposes OUR meanstd statistics (computed from the apple dataset)
+#     on the pretrained action head. That is not a pure zero-shot number.
+#
+# Start the LingBot deploy server first (WSL2 g1-eval, ~/lingbot-venv,
+# cwd = /mnt/c/Unitree/lingbot-vla-v2 — the robot config path is resolved
+# relative to the CWD). TWO checkpoints, TWO benchmark rows — they must not
+# end up under the same summary.json label:
+#
+#   post-train (jobs 184863+184864, 5000 Schritte) — the row we compare:
+#     /mnt/c/Unitree/_ft_out/lingbot_apple_pnp/checkpoints/global_step_5000/hf_ckpt
+#   zero-shot base (already on this box, see the norm-stats caveat above):
+#     /mnt/c/Unitree/_models/lingbot-vla-v2-6b-deploy/checkpoints/global_step_0/hf_ckpt
+#
+#   python deploy/lingbot_vla_v2_policy.py \
+#       --model_path <one of the two> \
+#       --port 8006 --chunk_ret true --use_length -1 --use_bf16 true --use_compile false
+#
+# The post-train hf_ckpt does not exist right after training: the trainer
+# writes DCP sharded across the 8 ranks (72 GB), and hf_ckpt appears only with
+# --train.save_hf_weights. Export + fetch: eu-hub/fetch_lingbot_ft.sh
+#
+# Then this HTTP server (Windows, vla-server\.venv). WSL2 localhost
+# forwarding makes the WSL port reachable as localhost:8006 from Windows:
+#   python server.py --config configs/g1_apple_pnp_lingbot.yaml
+
+model: lingbot
+host: 0.0.0.0
+port: 8000
+
+# Dieser Prozess ist eine Bruecke, keine Inferenz: gerechnet wird im
+# LingBot-Deploy-Server in WSL2. Ohne diese Zeile greift die Vorgabe aus
+# server.py ("mps", macOS Metal) und landet als server.health.device in JEDER
+# summary.json — auf einer Windows/RTX-5090-Box eine falsche Protokollangabe.
+device: cpu
+
+default_task: "move the apple to the plate"
+
+# LingBot deploy server (WebSocket + msgpack)
+lingbot_host: localhost
+lingbot_port: 8006
+
+# Picks configs/robot_configs/g1_dex3_apple.yaml on the server. The file name
+# IS the robo_name (lingbot_vla_v2_policy.py:353) — renaming one without the
+# other silently breaks the reset.
+lingbot_robo_name: g1_dex3_apple
+
+# Camera: exactly one, native resolution. The policy's own processor resizes
+# to data.img_size (256); a client-side squash would only lose detail twice.
+lingbot_image_key: ego_view
+lingbot_obs_image_key: observation.images.ego_view
+lingbot_image_size: null
+
+# Observation keys must match the origin_keys of the robot config above.
+lingbot_obs_state_key: observation.state
+lingbot_obs_task_key: task
+lingbot_state_dim: 43
+
+# Group order the LingBot server RETURNS. reverse_features() re-assembles the
+# response sorted by the origin 'end' index (utils.py:359-366):
+#   waist(end 15) < left_arm(22) < right_arm(29) < left_hand(36) < right_hand(43)
+# Confirmed empirically on a real dataset frame.
+lingbot_response_keys:
+  waist: 3
+  left_arm: 7
+  right_arm: 7
+  left_hand: 7
+  right_hand: 7
+
+# Group order OUR contract expects. The backend permutes response -> action;
+# the two blocks must contain the same names with the same widths.
+lingbot_action_keys:
+  left_arm: 7
+  right_arm: 7
+  left_hand: 7
+  right_hand: 7
+  waist: 3
+
+lingbot_chunk_size: 50
+lingbot_timeout_s: 120.0
+lingbot_connect_retries: 3

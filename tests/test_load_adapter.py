@@ -1,7 +1,7 @@
 """
 Tests for the /load-adapter endpoint and model lock.
 
-Uses the pi05 stub model — no ML deps. Validates the wiring + concurrency
+Uses the dependency-free stub backend (models/stub.py) — no ML deps. Validates the wiring + concurrency
 behavior; the real PEFT hot-swap path is exercised manually against SmolVLA.
 """
 
@@ -17,7 +17,7 @@ from server import ServerConfig, app
 
 @pytest.fixture
 def client():
-    cfg = ServerConfig(model="pi05", stub=True, port=9999)
+    cfg = ServerConfig(model="stub", stub=True, port=9999)
     app.state.config = cfg
     with TestClient(app) as c:
         yield c
@@ -59,7 +59,7 @@ class TestLoadAdapter:
         assert resp.status_code == 422
 
     def test_health_reflects_active_adapter(self, client):
-        # Initially no adapter on the pi05 stub
+        # Initially no adapter on the stub
         h0 = client.get("/health").json()
         assert h0["active_adapter_id"] is None
 

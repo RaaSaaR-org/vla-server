@@ -1,0 +1,51 @@
+# Unitree G1 EDU + Dex3-1 — apple-to-plate, pi0.5 (Physical Intelligence / LeRobot).
+#
+# Same task, same /predict contract and same 43-dim state as
+# configs/g1_apple_pnp.yaml (GR00T) — eval/run_apple_eval.py and
+# eval/compare_runs.py work against this server unchanged. Anders als bei
+# GR00T und LingBot laeuft das Modell hier IN DIESEM PROZESS: pi0.5 ist eine
+# LeRobot-Policy, es gibt keinen zweiten Server dahinter.
+#
+# Contract (C:\Unitree\_data\apple_pnp\CONTRACT.md ist massgeblich):
+#   - state:  43-dim float32 Gelenkpositionen [rad]
+#     [L-Bein 0:6 | R-Bein 6:12 | Taille 12:15 | L-Arm 15:22 |
+#      R-Arm 22:29 | L-Hand 29:36 | R-Hand 36:43]
+#   - action: 31-dim flache Positionsziele
+#     [L-Arm 7 | R-Arm 7 | L-Hand 7 | R-Hand 7 | Taille 3]
+#     action[29:36] ist ein normierter GRIFF-CODE, kein Radiant. Der Dekoder
+#     sitzt NICHT im Backend, sondern in eval/run_apple_eval.py — genau wie
+#     bei GR00T. Nicht doppelt dekodieren.
+#   - eine Kamera "ego_view", nativ 640x480 RGB
+#   - Aufgabentext: "move the apple to the plate"
+#
+# Unterschiede zur GR00T-Zelle des Benchmarks — beide gehoeren in jeden
+# Vergleich der Zahlen:
+#   - Chunk 50 statt 16. Der Server liefert den vollen Chunk; der Eval-Runner
+#     schneidet mit --exec-horizon 8 selbst ab, also wie bei GR00T.
+#   - pi0.5 sieht einen ABGELEITETEN Datensatz: _data/apple_pnp/dataset_v30_a31
+#     mit 31-dim Aktion. LeRobot kann keine Teilmenge eines Aktionsvektors
+#     trainieren (policies/factory.py:530), und PI05Config.max_action_dim ist
+#     32 — 43 Dimensionen laufen in ein nn.Linear(32,...). Der Datensatz ist
+#     inhaltlich identisch, nur ohne Beine und ohne die action.*-Nebenschluessel.
+#     Begruendung im Kopf von vla-training/scripts/33_make_dataset_action31.py.
+#   - Normalisierung ueber QUANTILE (q01/q99), nicht MEAN_STD. Die Statistiken
+#     stecken im Checkpoint (policy_preprocessor.json / policy_postprocessor.json),
+#     nicht in einer separaten stats.json.
+#   - Voll-Finetune, kein LoRA — bewusst, damit die Zahl gegen GR00T Recipe A
+#     und LingBot lesbar bleibt (eu-hub/train_pi05_apple.sbatch).
+#
+# Start (Windows, vla-server\.venv, braucht lerobot[pi]):
+#   python server.py --config configs/g1_apple_pnp_pi05.yaml
+
+model: pi05
+
+# Auf den heimgeholten Checkpoint zeigen lassen. LeRobot legt unter
+# checkpoints/<step>/pretrained_model ab — das ist der Pfad, nicht das
+# Elternverzeichnis.
+model_path: C:/Unitree/_ft_out/apple_pnp_pi05/checkpoints/005000/pretrained_model
+device: cuda
+
+host: 0.0.0.0
+port: 8000
+
+default_task: "move the apple to the plate"

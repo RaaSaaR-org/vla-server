@@ -29,7 +29,7 @@ default_task: "Pick up the object."
 # /health reports stub: true so clients can detect it.
 stub: false
 
-# Stub action dimension (pi05 backend). Default 6 (SO-101);
+# Stub action dimension (models/stub.py). Default 6 (SO-101);
 # set 29 for Unitree G1 sim rollouts. Env override: VLA_ACTION_DIM
 # action_dim: 29
 

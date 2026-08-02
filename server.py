@@ -3,7 +3,7 @@
 @description Consolidated VLA inference server — FastAPI HTTP.
 
 Replaces smolvla-server/ and vla-inference/ with a single, model-agnostic
-HTTP server. Supports SmolVLA, pi0.5 (stub), and future model backends.
+HTTP server. Supports SmolVLA, pi0.5, GR00T, LingBot and a dependency-free stub backend.
 
 Usage:
     uv run python server.py                       # defaults from config.yaml
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ServerConfig:
-    model: str = "smolvla"          # "smolvla" | "pi05" | "groot"
+    model: str = "smolvla"          # "smolvla" | "pi05" | "groot" | "lingbot"
     model_path: str = "lerobot/smolvla_base"
     device: str = "mps"
     host: str = "0.0.0.0"
@@ -86,6 +86,28 @@ class ServerConfig:
     groot_action_keys: dict[str, int] | None = None  # e.g. {"single_arm": 5, "gripper": 1}
     groot_timeout_ms: int = 15000
     groot_ping_retries: int = 3  # startup ping attempts (2s apart) before giving up
+
+    # LingBot-VLA 2.0 deploy server connection (model: lingbot). WebSocket +
+    # msgpack, not ZMQ — see models/lingbot.py.
+    lingbot_host: str = "localhost"
+    lingbot_port: int = 8006
+    lingbot_api_key: str | None = None
+    # Selects configs/robot_configs/<robo_name>.yaml on the LingBot side; it
+    # defines the whole state/action mapping and must exist there.
+    lingbot_robo_name: str = "g1_dex3_apple"
+    lingbot_image_key: str = "ego_view"          # camera name in /predict
+    lingbot_obs_image_key: str = "observation.images.ego_view"
+    lingbot_obs_state_key: str = "observation.state"
+    lingbot_obs_task_key: str = "task"
+    lingbot_image_size: int | None = None        # None -> native resolution
+    lingbot_state_dim: int = 43
+    # Group order as RETURNED by the LingBot server, and the order our
+    # contract expects. Same names + widths; the backend permutes between them.
+    lingbot_response_keys: dict[str, int] | None = None
+    lingbot_action_keys: dict[str, int] | None = None
+    lingbot_chunk_size: int = 50
+    lingbot_timeout_s: float = 120.0
+    lingbot_connect_retries: int = 3
 
     @classmethod
     def from_yaml(cls, path: str | Path = "config.yaml") -> "ServerConfig":
@@ -187,13 +209,49 @@ def create_model(config: ServerConfig) -> VLAModel:
             ping_retries=config.groot_ping_retries,
         )
 
-    if config.stub or config.model == "pi05":
-        from models.pi05 import Pi05Model
-        return Pi05Model(
+    if config.model == "lingbot":
+        from models.lingbot import LingBotModel
+
+        host = os.environ.get("VLA_LINGBOT_HOST", config.lingbot_host)
+        port = int(os.environ.get("VLA_LINGBOT_PORT", str(config.lingbot_port)))
+        stub = config.stub or os.environ.get("VLA_STUB", "").lower() in ("1", "true")
+        return LingBotModel(
+            host=host,
+            port=port,
+            stub=stub,
+            api_key=os.environ.get("VLA_LINGBOT_API_KEY", config.lingbot_api_key),
+            robo_name=config.lingbot_robo_name,
+            image_key=config.lingbot_image_key,
+            obs_image_key=config.lingbot_obs_image_key,
+            obs_state_key=config.lingbot_obs_state_key,
+            obs_task_key=config.lingbot_obs_task_key,
+            image_size=config.lingbot_image_size,
+            state_dim=config.lingbot_state_dim,
+            response_keys=config.lingbot_response_keys,
+            action_keys=config.lingbot_action_keys,
+            chunk_size=config.lingbot_chunk_size,
+            timeout_s=config.lingbot_timeout_s,
+            connect_retries=config.lingbot_connect_retries,
+        )
+
+    # Stub first, and on its own. Until 2026-08-02 this read
+    # `config.stub or config.model == "pi05"` — because pi05 WAS the stub. Now
+    # that pi0.5 has a real LeRobot backend, folding the two together would drag
+    # torch and a 3B checkpoint into every `--stub` run.
+    if config.stub:
+        from models.stub import StubModel
+        # action_dim belongs to the stub, not to pi05: the real backend reads
+        # its dimensions out of the checkpoint (pi05.py load()), where an
+        # override could only contradict the weights.
+        return StubModel(
             model_path=config.model_path,
             device=config.device,
             action_dim=config.action_dim,
         )
+
+    if config.model == "pi05":
+        from models.pi05 import Pi05Model
+        return Pi05Model(model_path=config.model_path, device=config.device)
 
     if config.model == "smolvla":
         from models.smolvla import SmolVLAModel

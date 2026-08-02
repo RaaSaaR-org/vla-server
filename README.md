@@ -243,7 +243,7 @@ python server.py --config configs/g1_apple_pnp.yaml
 | `VLA_ZMQ_PORT`        | GR00T ZMQ server port           | from config.yaml |
 | `VLA_GROOT_API_TOKEN` | GR00T PolicyServer API token    | from config.yaml |
 | `VLA_STUB`            | Force stub mode (`true`/`1`)    | `false`          |
-| `VLA_ACTION_DIM`      | Stub action dimension (pi05)    | `6` (SO-101); `29` for G1 |
+| `VLA_ACTION_DIM`      | Stub action dimension           | `6` (SO-101); `29` for G1 |
 
 ## Tests
 
