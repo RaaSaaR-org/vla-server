@@ -1,7 +1,7 @@
 """
 Tests for the VLA inference server.
 
-Uses the pi05 stub model (no ML dependencies required).
+Uses the dependency-free stub backend (models/stub.py).
 """
 
 import base64
@@ -18,7 +18,7 @@ from server import ServerConfig, app, create_model
 @pytest.fixture
 def client():
     """Create a test client with stub model."""
-    cfg = ServerConfig(model="pi05", stub=True, port=9999)
+    cfg = ServerConfig(model="stub", stub=True, port=9999)
     app.state.config = cfg
     with TestClient(app) as c:
         yield c
@@ -70,7 +70,7 @@ class TestPredict:
         assert resp.status_code == 200
         data = resp.json()
         assert "actions" in data
-        assert len(data["actions"]) == 50  # pi05 chunk_size
+        assert len(data["actions"]) == 50  # stub chunk_size
         assert len(data["actions"][0]) == 6  # action_dim
         assert "timestamp" in data
         assert "inference_time_ms" in data
@@ -133,7 +133,7 @@ class TestAuth:
 
     @pytest.fixture
     def auth_client(self):
-        cfg = ServerConfig(model="pi05", stub=True, port=9999, auth_token=self.TOKEN)
+        cfg = ServerConfig(model="stub", stub=True, port=9999, auth_token=self.TOKEN)
         app.state.config = cfg
         with TestClient(app) as c:
             yield c
@@ -209,8 +209,8 @@ class TestModelFactory:
     def test_create_stub_model(self):
         cfg = ServerConfig(stub=True)
         model = create_model(cfg)
-        from models.pi05 import Pi05Model
-        assert isinstance(model, Pi05Model)
+        from models.stub import StubModel
+        assert isinstance(model, StubModel)
 
     def test_create_pi05_model(self):
         cfg = ServerConfig(model="pi05")
@@ -225,12 +225,17 @@ class TestModelFactory:
 
 
 class TestConfigurableActionDim:
-    """Configurable stub action dimension (e.g. 29 for the Unitree G1)."""
+    """Configurable stub action dimension (e.g. 29 for the Unitree G1).
 
-    def test_pi05_action_dim_29(self):
-        from models.pi05 import Pi05Model
+    The knob sits on StubModel, not on Pi05Model: since 2026-08-02 pi05 is a
+    real LeRobot backend that reads its dimensions from the checkpoint, and
+    `--stub` no longer routes through it (server.py create_model).
+    """
 
-        model = Pi05Model(action_dim=29)
+    def test_stub_action_dim_29(self):
+        from models.stub import StubModel
+
+        model = StubModel(action_dim=29)
         model.load()
         result = model.predict({"front": ""}, [0.0] * 29, "walk forward")
         assert len(result.actions) == 50
@@ -241,36 +246,36 @@ class TestConfigurableActionDim:
 
     def test_env_var_honored_via_create_model(self, monkeypatch):
         """VLA_ACTION_DIM flows through ServerConfig/create_model to the stub."""
-        from models.pi05 import Pi05Model
+        from models.stub import StubModel
 
         monkeypatch.setenv("VLA_ACTION_DIM", "29")
         cfg = ServerConfig(model="pi05", stub=True)
         model = create_model(cfg)
-        assert isinstance(model, Pi05Model)
+        assert isinstance(model, StubModel)
         model.load()
         assert model.info().action_dim == 29
         assert len(model.predict({"front": ""}, [0.0] * 29, "t").actions[0]) == 29
 
     def test_explicit_param_beats_env(self, monkeypatch):
-        from models.pi05 import Pi05Model
+        from models.stub import StubModel
 
         monkeypatch.setenv("VLA_ACTION_DIM", "29")
-        model = Pi05Model(action_dim=12)
+        model = StubModel(action_dim=12)
         assert model.info().action_dim == 12
 
     def test_garbage_env_falls_back_to_default(self, monkeypatch):
-        from models.pi05 import Pi05Model
+        from models.stub import StubModel
 
         monkeypatch.setenv("VLA_ACTION_DIM", "banana")
-        assert Pi05Model().info().action_dim == 6
+        assert StubModel().info().action_dim == 6
         monkeypatch.setenv("VLA_ACTION_DIM", "-3")
-        assert Pi05Model().info().action_dim == 6
+        assert StubModel().info().action_dim == 6
 
     def test_dim29_reset_determinism(self):
         """reset() restarts the 29-dim sine sequence identically."""
-        from models.pi05 import Pi05Model
+        from models.stub import StubModel
 
-        model = Pi05Model(action_dim=29)
+        model = StubModel(action_dim=29)
         model.load()
         first = model.predict({"front": ""}, [0.0] * 29, "t").actions
         second = model.predict({"front": ""}, [0.0] * 29, "t").actions
@@ -278,6 +283,14 @@ class TestConfigurableActionDim:
         model.reset()
         again = model.predict({"front": ""}, [0.0] * 29, "t").actions
         assert first == again
+
+    def test_pi05_backend_takes_no_action_dim(self):
+        """The real backend must not grow a dimension override by accident."""
+        import inspect
+
+        from models.pi05 import Pi05Model
+
+        assert "action_dim" not in inspect.signature(Pi05Model.__init__).parameters
 
 
 class TestPredictMultiCamera:

@@ -54,10 +54,29 @@ def dummy_image_b64() -> str:
 # ── Fake Isaac-GR00T PolicyServer ────────────────────────────────
 
 
+# Mirror image of gr00t.policy.server_client.MsgSerializer. Spelled out here
+# instead of imported from models.groot on purpose: the server end of the wire
+# has to be described independently, or a round-trip test would pass for
+# whatever codec the client happens to use.
+def npy_encode(obj):
+    if isinstance(obj, np.ndarray):
+        buf = io.BytesIO()
+        np.save(buf, obj, allow_pickle=False)
+        return {"__ndarray_class__": True, "as_npy": buf.getvalue()}
+    return obj
+
+
+def npy_decode(obj):
+    if isinstance(obj, dict) and "__ndarray_class__" in obj:
+        return np.load(io.BytesIO(obj["as_npy"]), allow_pickle=False)
+    return obj
+
+
+
 class FakeGrootServer(threading.Thread):
     """Emulates the Isaac-GR00T N1.7 PolicyServer wire protocol.
 
-    Envelope: {"endpoint", "data", "api_token"?} via msgpack_numpy.
+    Envelope: {"endpoint", "data", "api_token"?}; ndarrays as npy blobs.
     get_action returns (action_dict, info_dict); errors as {"error": str}.
     """
 
@@ -87,14 +106,14 @@ class FakeGrootServer(threading.Thread):
             if not poller.poll(50):
                 continue
             raw = self.socket.recv()
-            req = msgpack.unpackb(raw, object_hook=msgpack_np.decode, raw=False)
+            req = msgpack.unpackb(raw, object_hook=npy_decode, raw=False)
             self.requests.append(req)
             if self.delay_next_s:
                 time.sleep(self.delay_next_s)  # outlive the client's RCVTIMEO
                 self.delay_next_s = 0.0
             self.socket.send(
                 msgpack.packb(
-                    self._respond(req), default=msgpack_np.encode, use_bin_type=True
+                    self._respond(req), default=npy_encode, use_bin_type=True
                 )
             )
         self.socket.close(linger=0)
@@ -426,6 +445,62 @@ class TestGR00TParseAction:
         rows = stub_model._parse_action(action)
         assert len(rows) == 1
         assert rows[0] == [1.0, 2.0, 3.0, 4.0, 5.0, 0.5]
+
+
+# ── ndarray wire codec ───────────────────────────────────────────
+
+
+class TestGR00TNdarrayCodec:
+    """GR00TModel._encode_ndarray/_decode_ndarray against the 2026 fork.
+
+    The PolicyServer decodes with MsgSerializer alone. A msgpack_numpy 'nd'
+    dict arrives there as a plain dict, and obs["state"][key].shape fails
+    inside the policy — far from the packing site, so it is worth pinning.
+    """
+
+    def test_ndarray_encodes_as_npy_blob(self):
+        arr = np.arange(6, dtype=np.float32).reshape(2, 3)
+        enc = GR00TModel._encode_ndarray(arr)
+        assert enc["__ndarray_class__"] is True
+        assert enc["as_npy"][:6] == b"\x93NUMPY"
+
+    def test_non_ndarray_passes_through(self):
+        for obj in ("task", 3, [1.0, 2.0], {"a": 1}):
+            assert GR00TModel._encode_ndarray(obj) is obj
+
+    @pytest.mark.skipif(zmq is None, reason="msgpack not installed")
+    def test_round_trip_preserves_shape_and_dtype(self):
+        arr = np.arange(24, dtype=np.float32).reshape(1, 4, 6)
+        raw = msgpack.packb(
+            {"state": arr}, default=GR00TModel._encode_ndarray, use_bin_type=True
+        )
+        out = msgpack.unpackb(raw, object_hook=GR00TModel._decode_ndarray, raw=False)
+        assert isinstance(out["state"], np.ndarray)
+        assert out["state"].shape == (1, 4, 6)
+        assert out["state"].dtype == np.float32
+        assert np.array_equal(out["state"], arr)
+
+    @pytest.mark.skipif(zmq is None, reason="msgpack not installed")
+    def test_uint8_video_round_trip(self):
+        """Video is the big payload — dtype must survive, not widen to f8."""
+        frame = np.full((1, 1, 480, 640, 3), 200, dtype=np.uint8)
+        raw = msgpack.packb(
+            frame, default=GR00TModel._encode_ndarray, use_bin_type=True
+        )
+        out = msgpack.unpackb(raw, object_hook=GR00TModel._decode_ndarray, raw=False)
+        assert out.dtype == np.uint8
+        assert out.shape == (1, 1, 480, 640, 3)
+
+    @pytest.mark.skipif(zmq is None, reason="msgpack_numpy not installed")
+    def test_decodes_legacy_msgpack_numpy_response(self):
+        """Older servers still answer in msgpack_numpy; keep reading those."""
+        arr = np.arange(5, dtype=np.float32)
+        raw = msgpack.packb(
+            {"action": arr}, default=msgpack_np.encode, use_bin_type=True
+        )
+        out = msgpack.unpackb(raw, object_hook=GR00TModel._decode_ndarray, raw=False)
+        assert isinstance(out["action"], np.ndarray)
+        assert np.array_equal(out["action"], arr)
 
 
 # ── Wire-protocol tests against the fake PolicyServer ────────────

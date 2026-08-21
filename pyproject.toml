@@ -21,11 +21,40 @@ smolvla = [
     # package is lightweight; policy/dataset deps live behind extras.
     "lerobot[smolvla,dataset]>=0.6.0",
 ]
+# pi0.5 — NOT installable from PyPI. The backend loads a checkpoint written by
+# lerobot 0.5.2 @ 2d7a420, and a checkpoint must be read by the version that
+# wrote it: PreTrainedConfig.from_pretrained resolves the processor steps by
+# name, and those names moved between 0.5.x and 0.6.x. The cluster env that
+# produced the checkpoint was built from the same local clone
+# (vla-training/eu-hub/setup_env_pi05.sbatch:137-155) — install it the same way:
+#
+#   uv pip install --python .venv/Scripts/python.exe \
+#       torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
+#   uv pip install --python .venv/Scripts/python.exe -e "C:/Unitree/lerobot[pi,training,peft-dep]"
+#   uv pip uninstall --python .venv/Scripts/python.exe torchcodec
+#   uv pip install --python .venv/Scripts/python.exe "av==15.0.0"
+#
+# torch is pinned to cu128, not ">=2.1": the RTX 5090 is sm_120 and every
+# earlier CUDA wheel silently falls back to no-GPU. torchcodec is removed
+# because lerobot picks its video backend via find_spec("torchcodec") — a
+# half-installed one is worse than none (RUNBOOK_LINGBOT.md:368-372).
+# The extra below is a marker for tooling; it deliberately does NOT list
+# lerobot, because a PyPI resolve would pull 0.6.x over the pinned clone.
+pi05 = [
+    "scipy>=1.11",
+]
 # Install GR00T deps: uv pip install -e ".[groot]"
 groot = [
     "pyzmq>=25.0",
     "msgpack>=1.0",
     "msgpack-numpy>=0.4",
+]
+# Install LingBot deps: uv pip install -e ".[lingbot]"
+# msgpack only — the openpi array codec is vendored in models/lingbot.py and
+# is wire-incompatible with the msgpack-numpy the GR00T backend uses.
+lingbot = [
+    "websockets>=12.0",
+    "msgpack>=1.0",
 ]
 dev = [
     "httpx",

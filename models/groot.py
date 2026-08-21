@@ -8,7 +8,9 @@ Wire protocol (Isaac-GR00T gr00t/policy/server_client.py):
 - Request:  msgpack {"endpoint": str, "data": dict, "api_token": str?}
 - Response: msgpack; "get_action" returns (action_dict, info_dict),
   errors come back as {"error": str}
-- Arrays travel as msgpack_numpy (the server refuses pickle payloads)
+- Arrays travel as npy blobs, {"__ndarray_class__": True, "as_npy": ...},
+  the format of gr00t.policy.server_client.MsgSerializer; responses in the
+  older msgpack_numpy encoding are still accepted (no pickle either way)
 
 Observation format (N1.7, batch B=1, time T=1):
     {"video":    {<camera>: (1, 1, H, W, 3) uint8},   # one entry per video_keys
@@ -239,10 +241,29 @@ class GR00TModel(VLAModel):
         except Exception as e:
             logger.error(f"GR00T reconnect failed: {e}")
 
+    @staticmethod
+    def _encode_ndarray(obj):
+        # Wire format of gr00t.policy.server_client.MsgSerializer (2026 fork):
+        # ndarrays travel as npy blobs, not as msgpack_numpy 'nd' dicts. The
+        # server decodes with that serializer only, so the client must match.
+        if isinstance(obj, np.ndarray):
+            buf = io.BytesIO()
+            np.save(buf, obj, allow_pickle=False)
+            return {"__ndarray_class__": True, "as_npy": buf.getvalue()}
+        return obj
+
+    @staticmethod
+    def _decode_ndarray(obj):
+        if isinstance(obj, dict) and "__ndarray_class__" in obj:
+            return np.load(io.BytesIO(obj["as_npy"]), allow_pickle=False)
+        if isinstance(obj, dict) and obj.get(b"nd") is True:  # msgpack_numpy legacy
+            import msgpack_numpy as m
+            return m.decode(obj)
+        return obj
+
     def _request(self, endpoint: str, data: dict | None = None):
         """One PolicyServer round-trip; rebuilds the socket on failure."""
         import msgpack
-        import msgpack_numpy as m
 
         payload: dict = {"endpoint": endpoint}
         if data is not None:
@@ -252,7 +273,7 @@ class GR00TModel(VLAModel):
 
         try:
             self._socket.send(
-                msgpack.packb(payload, default=m.encode, use_bin_type=True)
+                msgpack.packb(payload, default=self._encode_ndarray, use_bin_type=True)
             )
             raw = self._socket.recv()
         except Exception as e:
@@ -261,7 +282,7 @@ class GR00TModel(VLAModel):
                 f"GR00T PolicyServer at {self.host}:{self.port} not responding: {e}"
             )
 
-        result = msgpack.unpackb(raw, object_hook=m.decode, raw=False)
+        result = msgpack.unpackb(raw, object_hook=self._decode_ndarray, raw=False)
         if isinstance(result, dict) and "error" in result:
             raise RuntimeError(f"GR00T server error: {result['error']}")
         return result

@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 *.pyc
 config.yaml
+*.local.yaml
 uv.lock
 .env
 _stub*.log
