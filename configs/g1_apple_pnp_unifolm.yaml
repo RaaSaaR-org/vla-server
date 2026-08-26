@@ -1,0 +1,41 @@
+# Unitree G1 EDU + Dex3-1 — apple-to-plate, UnifoLM-VLA (Unitree).
+#
+# Viertes Modell der Kampagne. Gleicher /predict-Vertrag und gleicher 43-dim
+# Zustand wie GR00T, pi0.5 und LingBot — eval/run_apple_eval.py und
+# eval/compare_runs.py laufen unveraendert dagegen.
+#
+# Wie GR00T und LingBot laeuft das Modell NICHT in diesem Prozess. UnifoLM
+# braucht torch 2.7.1+cu128, TensorFlow 2.15 und das unifolm_vla-Paket. Erst
+# die Bruecke starten, dann diesen Server:
+#
+#   ~/venvs/unifolm/bin/python \
+#     ~/develop/vla-training/unifolm/serve/infer_server.py \
+#     --run-dir ~/runs/unifolm/<lauf> --port 8010
+#   python server.py --config configs/g1_apple_pnp_unifolm.yaml
+#
+# Unterschiede zu den anderen drei Zellen des Benchmarks — gehoeren in jeden
+# Vergleich der Zahlen:
+#   - Chunk 25 (NUM_ACTIONS_CHUNK der Embodiment g1_dex3_apple), gegen 16 bei
+#     GR00T und 50 bei pi0.5. Der Eval-Runner schneidet selbst ab.
+#   - Normierung BOUNDS (min/max), nicht QUANTILE. Die linke Hand ist ein
+#     8-Bit-Griffcode, dessen Extremwerte das Signal SIND; ein 1/99-Quantil
+#     wuerde genau die Griffe abschneiden.
+#   - Der Prompt ist der lange TRAININGS-Prompt, nicht der kurze aus Unitrees
+#     Deployment-Server. Beide unterscheiden sich im Original-Repo; wer den
+#     kurzen serviert, fuettert das Modell mit einer nie gesehenen Eingabe.
+#   - Ein Bild (ego_view). Der Deployment-Server im Repo erwartet drei.
+#   - Volltraining auf 2x H200, wie pi0.5 und LingBot.
+#
+# Der Griff-Code der linken Hand wird NICHT im Backend dekodiert — das macht
+# eval/run_apple_eval.py, genau wie bei GR00T und pi0.5.
+
+model: unifolm
+
+unifolm_url: http://127.0.0.1:8010
+unifolm_timeout_s: 60.0
+unifolm_connect_retries: 20
+
+host: 0.0.0.0
+port: 8000
+
+default_task: "move the apple to the plate"

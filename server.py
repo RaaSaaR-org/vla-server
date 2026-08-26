@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ServerConfig:
-    model: str = "smolvla"          # "smolvla" | "pi05" | "groot" | "lingbot"
+    model: str = "smolvla"          # "smolvla" | "pi05" | "groot" | "lingbot" | "unifolm"
     model_path: str = "lerobot/smolvla_base"
     device: str = "mps"
     host: str = "0.0.0.0"
@@ -69,6 +69,11 @@ class ServerConfig:
     # endpoints except /health. None disables auth (dev only).
     auth_token: str | None = None
     # GR00T N1.7 PolicyServer connection (model: groot).
+    # UnifoLM-VLA bridge (model: unifolm) — see
+    # vla-training/unifolm/serve/infer_server.py
+    unifolm_url: str = "http://127.0.0.1:8010"
+    unifolm_timeout_s: float = 60.0
+    unifolm_connect_retries: int = 20
     groot_host: str = "localhost"
     groot_port: int = 5555
     groot_api_token: str | None = None
@@ -252,6 +257,16 @@ def create_model(config: ServerConfig) -> VLAModel:
     if config.model == "pi05":
         from models.pi05 import Pi05Model
         return Pi05Model(model_path=config.model_path, device=config.device)
+
+    if config.model == "unifolm":
+        # HTTP-Bruecke wie GR00T/LingBot: UnifoLM braucht ein eigenes venv
+        # (torch 2.7.1+cu128, TensorFlow 2.15, unifolm_vla).
+        from models.unifolm import UnifolmModel
+        return UnifolmModel(
+            url=os.environ.get("VLA_UNIFOLM_URL", config.unifolm_url),
+            timeout_s=config.unifolm_timeout_s,
+            connect_retries=config.unifolm_connect_retries,
+        )
 
     if config.model == "smolvla":
         from models.smolvla import SmolVLAModel
