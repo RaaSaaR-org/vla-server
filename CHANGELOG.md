@@ -3,6 +3,21 @@
 All notable changes to the NeoDEM VLA server are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versioning uses [CalVer](https://calver.org/) (`YYYY.MM.DD`) for daily releases.
 
+## [v2026.08.27] - 2026-08-27
+
+### Added
+
+- UnifoLM-VLA backend as an HTTP bridge
+- real LeRobot backend on dz-226, LingBot, stub extraction + groot npy wire fix (#10)
+- apple-to-plate g1 config (NVIDIA GR00T-N1.7-AppleToPlate recipe) (#9)
+- configurable action dimension for G1 (29-DoF) sim rollouts (#7)
+- g1_dex3 support - multi-camera, configurable language key, native-resolution passthrough (#8)
+
+### Maintenance
+
+- move LeRobot to PyPI lerobot[smolvla,dataset]>=0.6.0 (#5)
+
+
 ## [v2026.07.04] - 2026-07-04
 
 ### Added
