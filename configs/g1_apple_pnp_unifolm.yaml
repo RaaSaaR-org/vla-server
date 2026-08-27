@@ -10,7 +10,7 @@
 #
 #   ~/venvs/unifolm/bin/python \
 #     ~/develop/vla-training/unifolm/serve/infer_server.py \
-#     --run-dir ~/runs/unifolm/<lauf> --port 8010
+#     --run-dir ~/runs/unifolm/<lauf> --port 8011
 #   python server.py --config configs/g1_apple_pnp_unifolm.yaml
 #
 # Unterschiede zu den anderen drei Zellen des Benchmarks — gehoeren in jeden
@@ -31,11 +31,30 @@
 
 model: unifolm
 
-unifolm_url: http://127.0.0.1:8010
+# 8011, NICHT 8010: dort sitzt der NVIDIA-ONNX-Server, und 8010 ist der
+# Default von LEAPP_URL in eval/run_arena_leapp_docker.sh. Die Bruecke
+# kennt nur /infer -- eine Kollision gaebe 404 pro Modellaufruf.
+unifolm_url: http://127.0.0.1:8011
 unifolm_timeout_s: 60.0
 unifolm_connect_retries: 20
 
 host: 0.0.0.0
 port: 8000
+
+# Dieser Prozess ist eine Bruecke, keine Inferenz: gerechnet wird in der
+# UnifoLM-Bruecke im venv ~/venvs/unifolm. Ohne diese Zeile greift die Vorgabe
+# aus server.py ("mps", macOS Metal) und landet als server.health.device in
+# JEDER summary.json -- eine falsche Protokollangabe. Gleiche Begruendung wie
+# in g1_apple_pnp_lingbot.yaml. (Der v16-/Arena-Pfad liest /health nicht,
+# betroffen waeren nur Laeufe ueber eval/run_apple_eval.py.)
+device: cpu
+
+# Nur fuer --stub: server.py:246 faengt den Stub VOR dem Modellzweig ab und
+# reicht config.action_dim durch. Ohne diese Zeile liefert ein Trockenlauf
+# 6 statt 31 Dimensionen und der Vertragstest schlaegt aus dem falschen
+# Grund fehl. Der echte Zweig liest die Breite von der Bruecke.
+action_dim: 31
+state_dim: 43
+cameras: ["ego_view"]
 
 default_task: "move the apple to the plate"

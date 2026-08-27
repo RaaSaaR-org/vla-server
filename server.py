@@ -54,6 +54,10 @@ class ServerConfig:
     # Stub action dimension (pi05 backend). None -> VLA_ACTION_DIM env var
     # -> default 6 (SO-101). Set 29 for Unitree G1 sim rollouts.
     action_dim: int | None = None
+    # Stub-Zustandsbreite und -Kameras. None -> wie action_dim bzw. ["front"].
+    # Nur der Stub liest sie; die echten Zweige holen beides vom Backend.
+    state_dim: int | None = None
+    cameras: list[str] | None = None
     # LoRA adapter (s3:// URI, local dir, or .tar.gz). Wraps base with PeftModel.
     adapter_path: str | None = None
     # Dataset stats.json for MEAN_STD un-normalization of actions.
@@ -71,7 +75,7 @@ class ServerConfig:
     # GR00T N1.7 PolicyServer connection (model: groot).
     # UnifoLM-VLA bridge (model: unifolm) — see
     # vla-training/unifolm/serve/infer_server.py
-    unifolm_url: str = "http://127.0.0.1:8010"
+    unifolm_url: str = "http://127.0.0.1:8011"
     unifolm_timeout_s: float = 60.0
     unifolm_connect_retries: int = 20
     groot_host: str = "localhost"
@@ -252,6 +256,8 @@ def create_model(config: ServerConfig) -> VLAModel:
             model_path=config.model_path,
             device=config.device,
             action_dim=config.action_dim,
+            state_dim=config.state_dim,
+            cameras=config.cameras,
         )
 
     if config.model == "pi05":

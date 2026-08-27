@@ -25,11 +25,11 @@ gegen die anderen drei unlesbar.
 genau wie bei den anderen Modellen.
 """
 
+import json
 import logging
 import time
+import urllib.request
 from typing import Any
-
-import requests
 
 from .base import ModelConfig, PredictResult, VLAModel
 
@@ -46,7 +46,7 @@ class UnifolmModel(VLAModel):
 
     def __init__(
         self,
-        url: str = "http://127.0.0.1:8010",
+        url: str = "http://127.0.0.1:8011",
         timeout_s: float = 60.0,
         connect_retries: int = 20,
         camera_key: str = CAMERA_KEY,
@@ -57,15 +57,26 @@ class UnifolmModel(VLAModel):
         self.camera_key = camera_key
         self._loaded = False
         self._chunk_size = CHUNK_SIZE
-        self._session = requests.Session()
+
+    def _get_json(self, path: str, timeout: float) -> dict[str, Any]:
+        req = urllib.request.Request(f"{self.url}{path}")
+        with urllib.request.urlopen(req, timeout=timeout) as f:
+            return json.loads(f.read())
+
+    def _post_json(self, path: str, payload: dict, timeout: float) -> dict[str, Any]:
+        req = urllib.request.Request(
+            f"{self.url}{path}",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as f:
+            return json.loads(f.read())
 
     def load(self) -> None:
         last = None
         for i in range(self.connect_retries):
             try:
-                r = self._session.get(f"{self.url}/health", timeout=5)
-                r.raise_for_status()
-                h = r.json()
+                h = self._get_json("/health", timeout=5)
                 if not h.get("ok"):
                     raise RuntimeError(f"Bruecke meldet nicht bereit: {h}")
                 if h.get("action_dim") != ACTION_DIM or h.get("state_dim") != STATE_DIM:
@@ -96,14 +107,12 @@ class UnifolmModel(VLAModel):
             )
 
         t0 = time.time()
-        r = self._session.post(
-            f"{self.url}/infer",
-            json={"images": {self.camera_key: images[self.camera_key]},
-                  "state": list(state), "task": task},
+        payload: dict[str, Any] = self._post_json(
+            "/infer",
+            {"images": {self.camera_key: images[self.camera_key]},
+             "state": list(state), "task": task},
             timeout=self.timeout_s,
         )
-        r.raise_for_status()
-        payload: dict[str, Any] = r.json()
         actions = payload["actions"]
         if not actions or len(actions[0]) != ACTION_DIM:
             raise RuntimeError(
@@ -133,5 +142,4 @@ class UnifolmModel(VLAModel):
         return self._loaded
 
     def close(self) -> None:
-        self._session.close()
         self._loaded = False

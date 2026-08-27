@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 # action_dim constructor param, action_dim in config.yaml, or VLA_ACTION_DIM.
 DEFAULT_ACTION_DIM = 6
 CHUNK_SIZE = 50
+# Zustandsbreite und Kameras folgen derselben Regel: Vorgabe bleibt das
+# unplausible SO-101-Format, abweichen darf nur, wer es beim Namen nennt
+# (state_dim / cameras in der config.yaml). Ohne das kann der
+# /predict-Vertragstest fuer KEIN Modell dieser Kampagne im Trockenlauf
+# bestehen: er schickt 43 Zustandswerte und die Kamera ego_view, der Stub
+# meldet 31 und "front", und der Server antwortet 422.
+DEFAULT_CAMERAS = ["front"]
 
 # Sine-wave stub parameters (realistic resting pose). Beyond the sixth index
 # the pattern repeats via j % len(...), with j * 0.5 keeping the phases apart.
@@ -72,10 +79,14 @@ class StubModel(VLAModel):
         model_path: str = "",
         device: str = "cpu",
         action_dim: int | None = None,
+        state_dim: int | None = None,
+        cameras: list[str] | None = None,
     ):
         self.model_path = model_path
         self.device = device
         self._action_dim = _resolve_action_dim(action_dim)
+        self._state_dim = int(state_dim) if state_dim else self._action_dim
+        self._cameras = list(cameras) if cameras else list(DEFAULT_CAMERAS)
         self._loaded = False
         self._step = 0
         self._active_adapter_id: str | None = None
@@ -85,7 +96,8 @@ class StubModel(VLAModel):
         self._step = 0
         logger.info(
             f"StubModel loaded (sine-wave actions, no ML deps, "
-            f"action_dim={self._action_dim})"
+            f"action_dim={self._action_dim}, state_dim={self._state_dim}, "
+            f"cameras={self._cameras})"
         )
 
     def predict(
@@ -122,8 +134,8 @@ class StubModel(VLAModel):
         return ModelConfig(
             action_dim=self._action_dim,
             chunk_size=CHUNK_SIZE,
-            cameras=["front"],
-            state_dim=self._action_dim,
+            cameras=list(self._cameras),
+            state_dim=self._state_dim,
         )
 
     @property
